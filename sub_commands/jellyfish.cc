@@ -22,6 +22,7 @@
 
 typedef int (main_func_t)(int argc, char *argv[]);
 
+main_func_t mcount_main;
 main_func_t count_main;
 main_func_t bc_main;
 main_func_t info_main;
@@ -45,6 +46,7 @@ struct cmd_func {
   main_func_t *func;
 };
 cmd_func cmd_list[] = {
+  {"mcount",            &mcount_main},
   {"count",             &count_main},
   {"bc",                &bc_main},
   {"info",              &info_main},

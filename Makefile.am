@@ -1,13 +1,21 @@
 ACLOCAL_AMFLAGS = -I m4
 
+#MIMIR_INC_DIR=$(srcdir)/mimir/include
+#MIMIR_LIB_DIR=$(srcdir)/mimir/lib
+
+MIMIR_INC_DIR=/usa/taogao/Documents/repo/mimir/src
+MIMIR_LIB_DIR=/usa/taogao/Documents/repo/mimir/src
+
 EXTRA_DIST = doc/jellyfish.pdf doc/jellyfish.man README LICENSE # jellyfish.spec
 man1_MANS = doc/jellyfish.man
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = jellyfish-2.0.pc
 
-AM_LDFLAGS = -lpthread # $(VALGRIND_LIBS)
-AM_CPPFLAGS = -Wall -Wnon-virtual-dtor -I$(srcdir) -I$(srcdir)/include -g -O3 $(VALGRIND_CFLAGS)
+CXX=mpicxx
+CXXLD=mpicxx
+AM_LDFLAGS = -lpthread -lmimir -L$(MIMIR_LIB_DIR) # $(VALGRIND_LIBS)
+AM_CPPFLAGS = -Wall -Wnon-virtual-dtor -I$(srcdir) -I$(srcdir)/include -I$(MIMIR_INC_DIR) -g -O3 $(VALGRIND_CFLAGS)
 AM_CXXFLAGS = $(ALL_CXXFLAGS) -g -O3
 
 noinst_HEADERS = $(YAGGO_SOURCES)
@@ -37,17 +45,18 @@ check_PROGRAMS = bin/generate_sequence
 # Build Jellyfish the exec #
 ############################
 bin_jellyfish_SOURCES = sub_commands/jellyfish.cc	\
-                        sub_commands/count_main.cc	\
-                        sub_commands/info_main.cc	\
-                        sub_commands/dump_main.cc	\
-                        sub_commands/histo_main.cc	\
-                        sub_commands/stats_main.cc	\
-                        sub_commands/merge_main.cc	\
-                        sub_commands/bc_main.cc		\
-                        sub_commands/query_main.cc	\
-                        sub_commands/cite_main.cc	\
-                        sub_commands/mem_main.cc	\
-                        jellyfish/merge_files.cc
+			sub_commands/mcount_main.cc	\
+			sub_commands/count_main.cc	\
+			sub_commands/info_main.cc	\
+			sub_commands/dump_main.cc	\
+			sub_commands/histo_main.cc	\
+			sub_commands/stats_main.cc	\
+			sub_commands/merge_main.cc	\
+			sub_commands/bc_main.cc		\
+			sub_commands/query_main.cc	\
+			sub_commands/cite_main.cc	\
+			sub_commands/mem_main.cc	\
+			jellyfish/merge_files.cc
 bin_jellyfish_LDFLAGS = $(AM_LDFLAGS) $(STATIC_FLAGS)
 
 
