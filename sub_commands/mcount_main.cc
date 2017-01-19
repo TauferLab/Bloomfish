@@ -106,7 +106,7 @@ void add_mer(mer_dna &m, uint64_t v,
     if(filter(m)){
         switch(op){
         case COUNT: {
-            //fprintf(stderr, "add mer:%s\n", m.to_str().c_str());
+            //printf("%s\n", m.to_str().c_str());
             ary.add(m, v); break;
         }
         case PRIME: ary.set(m); break;
@@ -144,6 +144,7 @@ void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
 
     MimirParam *param = (MimirParam*)ptr;
 
+
     while( !in->is_eof() ){
 
         unsigned int filled = 0;
@@ -155,31 +156,31 @@ void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
             // skip header
             skip_line(in, ptr);
             // until file tail or next sequence
-            ch = in->get_byte();
-            while( !in->is_eof() && ch != '>'){
-                ch = in->get_byte();
+            while( !in->is_eof() && ((ch = in->get_byte()) != '>')){
                 if(ch == '\n') {
                     in->next();
                     continue;
                 }
                 // code the sequence
                 int code = m.code(ch);
-                m.shift_left(code);
-                if(args.canonical_flag)
-                    rcm.shift_right(rcm.complement(code));
-                filled = std::min(filled + 1, mer_dna::k());
-                if(filled >= m.k()){
-                    mer_dna mer = args.canonical_flag || m < rcm ? m : rcm;
-                    add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+                if(code >= 0){
+                    m.shift_left(code);
+                    if(args.canonical_flag)
+                        rcm.shift_right(rcm.complement(code));
+                    filled = std::min(filled + 1, mer_dna::k());
+                    if(filled >= m.k()){
+                        mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
+                        add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+                    }
+                }else{
+                    filled = 0;
                 }
                 in->next();
             }
         }else if(ch == '@'){
             // skip header
             skip_line(in, ptr);
-            ch = in->get_byte();
-            while( !in->is_eof() && ch != '@'){
-                ch = in->get_byte();
+            while( !in->is_eof() && ((ch = in->get_byte()) != '@')){
                 // skip the scores
                 if(ch == '+'){
                     skip_line(in, ptr);
@@ -191,13 +192,17 @@ void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
                 }
                 // code the sequence
                 int code = m.code(ch);
-                m.shift_left(code);
-                if(args.canonical_flag)
-                    rcm.shift_right(rcm.complement(code));
-                filled = std::min(filled + 1, mer_dna::k());
-                if(filled >= m.k()){
-                    mer_dna mer = args.canonical_flag || m < rcm ? m : rcm;
-                    add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+                if(code >= 0){
+                    m.shift_left(code);
+                    if(args.canonical_flag)
+                        rcm.shift_right(rcm.complement(code));
+                    filled = std::min(filled + 1, mer_dna::k());
+                    if(filled >= m.k()){
+                        mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
+                        add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+                    }
+                }else{
+                    filled = 0;
                 }
                 in->next();
             }
@@ -228,16 +233,12 @@ void parse_qual_sequence(MIMIR_NS::InputStream* in, void *ptr){
         skip_line(in, ptr);
 
         // get sequence and quality scores
-        ch = in->get_byte();
-        while( !in->is_eof() && ch != '@'){
-            ch = in->get_byte();
+        while( !in->is_eof() && ((ch = in->get_byte()) != '@')){
             if(ch == '+'){
                 // skip header with '+'
                 skip_line(in, ptr);
                 // get quality score
-                ch = in->get_byte();
-                while( !in->is_eof() && ch != '@'){
-                    ch = in->get_byte();
+                while( !in->is_eof() && ((ch = in->get_byte()) != '@')){
                     if(ch == '\n') {
                         in->next();
                         continue;
@@ -265,13 +266,13 @@ void parse_qual_sequence(MIMIR_NS::InputStream* in, void *ptr){
         for(;seq_iter != seq.end(); seq_iter++, qual_iter++){
             const int code = m.code(*seq_iter);
             const char qual = *qual_iter;
-            if(qual >= args.min_qual_char_arg[0]){
+            if(code >=0 && qual >= args.min_qual_char_arg[0]){
                 m.shift_left(code);
                 if(args.canonical_flag)
                     rcm.shift_right(rcm.complement(code));
                 filled = std::min(filled + 1, mer_dna::k());
                 if(filled >= m.k()){
-                    mer_dna mer = args.canonical_flag || m < rcm ? m : rcm;
+                    mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
                     add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
                 }
             }else{
@@ -362,8 +363,12 @@ int mcount_main(int argc, char *argv[])
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
 
+  if(args.threads_arg > 1){
+    fprintf(stdout, "mcount currently does not support multithreading (1 therad is used)\n");
+  }
+
   header.canonical(args.canonical_flag);
-  mer_hash ary(args.size_arg, args.mer_len_arg * 2, args.counter_len_arg, args.threads_arg, args.reprobes_arg);
+  mer_hash ary(args.size_arg, args.mer_len_arg * 2, args.counter_len_arg, 1, args.reprobes_arg);
   ary.do_size_doubling(true);
   if(args.disk_flag){
     //ary.do_size_doubling(false);
@@ -426,18 +431,21 @@ int mcount_main(int argc, char *argv[])
   param.op = do_op;
   std::string path = *(args.file_arg.begin());
 
+  if(rank == 0) printf("start reading files\n");
   // local counting of mers
   mimir->process_binary_file(path.c_str(), 1, 1, read_sequence_files, 
                              split_sequence_files, &param, 0);
   // Shuffle
   if(rank == 0) printf("start shuffle\n");
   mimir->init_key_value(shuffle_mers, &param);
-  if(rank == 0) printf("after shuffle\n");
   ary.ary()->clear();
 
   // read back mers from Mimir
+  if(rank == 0) printf("after final counting\n");
   mimir->map_key_value(mimir.get(), add_kv_mers, &param, 0);
   //}
+  //
+  if(rank == 0) printf("done!\n");
 
   auto after_count_time = system_clock::now();
 
