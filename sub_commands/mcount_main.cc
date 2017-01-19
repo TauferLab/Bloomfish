@@ -91,6 +91,7 @@ struct filter_bf : public filter {
 
 extern mer_dna_bloom_counter* load_bloom_filter(const char* path);
 enum OPERATION { COUNT, PRIME, UPDATE };
+
 struct MimirParam{
     mer_hash      *ary;
     struct filter *filter;
@@ -99,11 +100,13 @@ struct MimirParam{
 };
 
 // add a mer to hash array
-void add_mer(mer_dna &m, uint64_t v, mer_hash& ary, filter& filter, OPERATION op){
+void add_mer(mer_dna &m, uint64_t v,
+             mer_hash& ary, filter& filter, OPERATION op){
+
     if(filter(m)){
         switch(op){
         case COUNT: {
-            std::string mer_str = m.to_str();
+            //fprintf(stderr, "add mer:%s\n", m.to_str().c_str());
             ary.add(m, v); break;
         }
         case PRIME: ary.set(m); break;
@@ -113,14 +116,169 @@ void add_mer(mer_dna &m, uint64_t v, mer_hash& ary, filter& filter, OPERATION op
         }; break;
         }
     }
+
 }
 
 // split sequence files
 bool split_sequence_files(MIMIR_NS::InputStream *in, void *ptr){
+
     unsigned char ch = in->get_byte();
     if(ch == '>') return true;
+    if(ch == '@') return true;
 
     return false;
+
+}
+
+// skip current line
+void skip_line(MIMIR_NS::InputStream* in, void *ptr){
+
+    while(!in->is_eof() && in->get_byte() != '\n')
+        in->next();
+    in->next();
+
+}
+
+// parse sequence file, ignore quality score
+void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
+
+    MimirParam *param = (MimirParam*)ptr;
+
+    while( !in->is_eof() ){
+
+        unsigned int filled = 0;
+        mer_dna m, rcm;
+        char ch;
+
+        ch = in->get_byte();
+        if(ch == '>'){
+            // skip header
+            skip_line(in, ptr);
+            // until file tail or next sequence
+            ch = in->get_byte();
+            while( !in->is_eof() && ch != '>'){
+                ch = in->get_byte();
+                if(ch == '\n') {
+                    in->next();
+                    continue;
+                }
+                // code the sequence
+                int code = m.code(ch);
+                m.shift_left(code);
+                if(args.canonical_flag)
+                    rcm.shift_right(rcm.complement(code));
+                filled = std::min(filled + 1, mer_dna::k());
+                if(filled >= m.k()){
+                    mer_dna mer = args.canonical_flag || m < rcm ? m : rcm;
+                    add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+                }
+                in->next();
+            }
+        }else if(ch == '@'){
+            // skip header
+            skip_line(in, ptr);
+            ch = in->get_byte();
+            while( !in->is_eof() && ch != '@'){
+                ch = in->get_byte();
+                // skip the scores
+                if(ch == '+'){
+                    skip_line(in, ptr);
+                    skip_line(in, ptr);
+                }
+                if(ch == '\n') {
+                    in->next();
+                    continue;
+                }
+                // code the sequence
+                int code = m.code(ch);
+                m.shift_left(code);
+                if(args.canonical_flag)
+                    rcm.shift_right(rcm.complement(code));
+                filled = std::min(filled + 1, mer_dna::k());
+                if(filled >= m.k()){
+                    mer_dna mer = args.canonical_flag || m < rcm ? m : rcm;
+                    add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+                }
+                in->next();
+            }
+
+        }else{
+            fprintf(stderr, "Format error!\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+}
+
+// parse sequence with quality score
+void parse_qual_sequence(MIMIR_NS::InputStream* in, void *ptr){
+
+    MimirParam *param = (MimirParam*)ptr;
+
+    // read until end of the file
+    while( !in->is_eof() ){
+
+        unsigned int filled = 0;
+        mer_dna m, rcm;
+        char ch;
+        std::string seq, qual;
+
+        // skip header
+        ch = in->get_byte();
+        if(ch != '@') break;
+        skip_line(in, ptr);
+
+        // get sequence and quality scores
+        ch = in->get_byte();
+        while( !in->is_eof() && ch != '@'){
+            ch = in->get_byte();
+            if(ch == '+'){
+                // skip header with '+'
+                skip_line(in, ptr);
+                // get quality score
+                ch = in->get_byte();
+                while( !in->is_eof() && ch != '@'){
+                    ch = in->get_byte();
+                    if(ch == '\n') {
+                        in->next();
+                        continue;
+                    }
+                    qual.append(&ch);
+                    in->next();
+                }
+            }
+            if(ch == '\n') {
+                in->next();
+                continue;
+            }
+            seq.append(&ch);
+            in->next();
+        }
+
+        if(seq.size() != qual.size()) {
+            fprintf(stderr, "the length of quality score does not match sequence length\n");
+            break;
+        }
+
+        // get mers
+        std::string::iterator seq_iter = seq.begin();
+        std::string::iterator qual_iter = qual.begin();
+        for(;seq_iter != seq.end(); seq_iter++, qual_iter++){
+            const int code = m.code(*seq_iter);
+            const char qual = *qual_iter;
+            if(qual >= args.min_qual_char_arg[0]){
+                m.shift_left(code);
+                if(args.canonical_flag)
+                    rcm.shift_right(rcm.complement(code));
+                filled = std::min(filled + 1, mer_dna::k());
+                if(filled >= m.k()){
+                    mer_dna mer = args.canonical_flag || m < rcm ? m : rcm;
+                    add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+                }
+            }else{
+                filled = 0;
+            }
+        }
+    }
 }
 
 // read sequence files
@@ -130,32 +288,13 @@ void read_sequence_files(MIMIR_NS::MapReduce* mr,
 {
     MimirParam *param = (MimirParam*)ptr;
 
-    unsigned int filled = 0;
-    mer_dna m, rcm;
-
-    char ch=0x00;
     while( in->is_empty() == false ){
-        ch = in->get_byte();
-        // go to another file
-        if(in->is_eof()){
-            filled = 0;
-        }else if(ch == '>'){
-            filled = 0;
-            while(in->is_eof() == false && 
-                  in->get_byte() != '\n')
-                in->next();
-            continue;
-        }else if(ch != '\n'){
-            int code = m.code(ch);
-            m.shift_left(code);
-            if(args.canonical_flag)
-                rcm.shift_right(rcm.complement(code));
-            filled = std::min(filled + 1, mer_dna::k());
-            if(filled >= m.k()){
-                mer_dna mer = args.canonical_flag || m < rcm ? m : rcm;
-                add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
-            }
-        }
+        char ch = in->get_byte();
+        // parse sequence file
+        if(ch == '>' || (ch == '@' && !args.min_qual_char_given)) 
+            parse_sequence(in, ptr);
+        // parse sequence file with quality score
+        else if(ch == '@') parse_qual_sequence(in, ptr);
         in->next();
     }
 
@@ -202,8 +341,10 @@ int mcount_main(int argc, char *argv[])
 {
   auto start_time = system_clock::now();
 
-  int provided;
+  int provided, rank, size;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
 
   jellyfish::file_header header;
   header.fill_standard();
@@ -230,11 +371,15 @@ int mcount_main(int argc, char *argv[])
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
 
+  // do not support multithreading
+  char outfile[1024]={0};
+  sprintf(outfile, "%s.%d.%d", args.output_arg, size, rank);
   std::unique_ptr<jellyfish::dumper_t<mer_array> > dumper;
   if(args.text_flag)
-    dumper.reset(new text_dumper(args.threads_arg, args.output_arg, &header));
+    dumper.reset(new text_dumper(1, outfile, &header));
   else
-      dumper.reset(new binary_dumper(args.out_counter_len_arg, ary.key_len(), args.threads_arg, args.output_arg, &header));
+      dumper.reset(new binary_dumper(args.out_counter_len_arg, ary.key_len(), 
+                                     1, outfile, &header));
   ary.dumper(dumper.get());
 
   MimirParam param;
@@ -272,23 +417,27 @@ int mcount_main(int argc, char *argv[])
     mer_filter.reset(new filter_bf(*bf));
   }
 
-  if(args.min_qual_char_given) {
-    fprintf(stderr, "mcount currently does not support -Q, --min-qual-char=string parameter.\n");
-    MPI_Abort(MPI_COMM_WORLD, 1);
-  } else {
-    param.ary = &ary;
-    param.filter = mer_filter.get();
-    param.op = do_op;
-    std::string path = *(args.file_arg.begin());
-    // local counting of mers
-    mimir->process_binary_file(path.c_str(), 1, 1, read_sequence_files, 
-                               split_sequence_files, &param, 0);
-    // Shuffle
-    mimir->init_key_value(shuffle_mers, &param);
-    ary.ary()->clear();
-    // read back mers from Mimir
-    mimir->map_key_value(mimir.get(), add_kv_mers, &param, 0);
-  }
+  //if(args.min_qual_char_given) {
+  //  fprintf(stderr, "mcount currently does not support -Q, --min-qual-char=string parameter.\n");
+  //  MPI_Abort(MPI_COMM_WORLD, 1);
+  //} else {
+  param.ary = &ary;
+  param.filter = mer_filter.get();
+  param.op = do_op;
+  std::string path = *(args.file_arg.begin());
+
+  // local counting of mers
+  mimir->process_binary_file(path.c_str(), 1, 1, read_sequence_files, 
+                             split_sequence_files, &param, 0);
+  // Shuffle
+  if(rank == 0) printf("start shuffle\n");
+  mimir->init_key_value(shuffle_mers, &param);
+  if(rank == 0) printf("after shuffle\n");
+  ary.ary()->clear();
+
+  // read back mers from Mimir
+  mimir->map_key_value(mimir.get(), add_kv_mers, &param, 0);
+  //}
 
   auto after_count_time = system_clock::now();
 
@@ -302,21 +451,23 @@ int mcount_main(int argc, char *argv[])
         dumper->max(args.upper_count_arg);
       dumper->dump(ary.ary());
     } else {
-      dumper->dump(ary.ary());
-      if(!args.no_merge_flag) {
-        std::vector<const char*> files = dumper->file_names_cstr();
-        uint64_t min = args.lower_count_given ? args.lower_count_arg : 0;
-        uint64_t max = args.upper_count_given ? args.upper_count_arg : std::numeric_limits<uint64_t>::max();
-        try {
-          merge_files(files, args.output_arg, header, min, max);
-        } catch(MergeError e) {
-          err::die(err::msg() << e.what());
-        }
-        if(!args.no_unlink_flag) {
-          for(int i =0; i < dumper->nb_files(); ++i)
-            unlink(files[i]);
-        }
-      } // if(!args.no_merge_flag
+      fprintf(stderr, "mcount currently does not support intermediate files.\n");
+      MPI_Abort(MPI_COMM_WORLD, 1);
+      //dumper->dump(ary.ary());
+      //if(!args.no_merge_flag) {
+      //  std::vector<const char*> files = dumper->file_names_cstr();
+      //  uint64_t min = args.lower_count_given ? args.lower_count_arg : 0;
+      //  uint64_t max = args.upper_count_given ? args.upper_count_arg : std::numeric_limits<uint64_t>::max();
+      //  try {
+      //    merge_files(files, args.output_arg, header, min, max);
+      //  } catch(MergeError e) {
+      //    err::die(err::msg() << e.what());
+      //  }
+      //  if(!args.no_unlink_flag) {
+      //    for(int i =0; i < dumper->nb_files(); ++i)
+      //      unlink(files[i]);
+      //  }
+      //} // if(!args.no_merge_flag
     } // if(!args.no_merge_flag
   }
 
