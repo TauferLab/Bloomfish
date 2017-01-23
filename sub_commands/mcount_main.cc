@@ -120,9 +120,9 @@ void add_mer(mer_dna &m, uint64_t v,
 }
 
 // split sequence files
-bool split_sequence_files(MIMIR_NS::InputStream *in, void *ptr){
+bool split_sequence_files(MIMIR_NS::FileReader *in, void *ptr){
 
-    unsigned char ch = in->get_byte();
+    char ch = *(in->get_byte());
     if(ch == '>') return true;
     if(ch == '@') return true;
 
@@ -131,16 +131,16 @@ bool split_sequence_files(MIMIR_NS::InputStream *in, void *ptr){
 }
 
 // skip current line
-void skip_line(MIMIR_NS::InputStream* in, void *ptr){
+void skip_line(MIMIR_NS::FileReader* in, void *ptr){
 
-    while(!in->is_eof() && in->get_byte() != '\n')
+    while(!in->is_eof() && *(in->get_byte()) != '\n')
         in->next();
     in->next();
 
 }
 
 // parse sequence file, ignore quality score
-void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
+void parse_sequence(MIMIR_NS::FileReader* in, void *ptr){
 
     MimirParam *param = (MimirParam*)ptr;
 
@@ -151,12 +151,12 @@ void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
         mer_dna m, rcm;
         char ch;
 
-        ch = in->get_byte();
+        ch = *(in->get_byte());
         if(ch == '>'){
             // skip header
             skip_line(in, ptr);
             // until file tail or next sequence
-            while( !in->is_eof() && ((ch = in->get_byte()) != '>')){
+            while( !in->is_eof() && ((ch = *(in->get_byte())) != '>')){
                 if(ch == '\n') {
                     in->next();
                     continue;
@@ -180,7 +180,7 @@ void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
         }else if(ch == '@'){
             // skip header
             skip_line(in, ptr);
-            while( !in->is_eof() && ((ch = in->get_byte()) != '@')){
+            while( !in->is_eof() && ((ch = *(in->get_byte())) != '@')){
                 // skip the scores
                 if(ch == '+'){
                     skip_line(in, ptr);
@@ -215,7 +215,7 @@ void parse_sequence(MIMIR_NS::InputStream* in, void *ptr){
 }
 
 // parse sequence with quality score
-void parse_qual_sequence(MIMIR_NS::InputStream* in, void *ptr){
+void parse_qual_sequence(MIMIR_NS::FileReader* in, void *ptr){
 
     MimirParam *param = (MimirParam*)ptr;
 
@@ -228,17 +228,17 @@ void parse_qual_sequence(MIMIR_NS::InputStream* in, void *ptr){
         std::string seq, qual;
 
         // skip header
-        ch = in->get_byte();
+        ch = *(in->get_byte());
         if(ch != '@') break;
         skip_line(in, ptr);
 
         // get sequence and quality scores
-        while( !in->is_eof() && ((ch = in->get_byte()) != '@')){
+        while( !in->is_eof() && ((ch = *(in->get_byte())) != '@')){
             if(ch == '+'){
                 // skip header with '+'
                 skip_line(in, ptr);
                 // get quality score
-                while( !in->is_eof() && ((ch = in->get_byte()) != '@')){
+                while( !in->is_eof() && ((ch = *(in->get_byte())) != '@')){
                     if(ch == '\n') {
                         in->next();
                         continue;
@@ -284,13 +284,13 @@ void parse_qual_sequence(MIMIR_NS::InputStream* in, void *ptr){
 
 // read sequence files
 void read_sequence_files(MIMIR_NS::MapReduce* mr,
-                    MIMIR_NS::InputStream* in,
+                    MIMIR_NS::FileReader* in,
                     void* ptr)
 {
     MimirParam *param = (MimirParam*)ptr;
 
     while( in->is_empty() == false ){
-        char ch = in->get_byte();
+        char ch = *(in->get_byte());
         // parse sequence file
         if(ch == '>' || (ch == '@' && !args.min_qual_char_given)) 
             parse_sequence(in, ptr);
