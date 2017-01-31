@@ -19,7 +19,6 @@
 #include <assert.h>
 #include <signal.h>
 #include <mpi.h>
-#include <mapreduce.h>
 
 #include <iostream>
 #include <fstream>
@@ -35,6 +34,9 @@
 #include <jellyfish/merge_files.hpp>
 #include <jellyfish/mer_dna_bloom_counter.hpp>
 #include <sub_commands/count_main_cmdline.hpp>
+
+#include "mimir.h"
+using namespace MIMIR_NS;
 
 static count_main_cmdline args; // Command line switches and arguments
 
@@ -101,8 +103,8 @@ struct MimirParam{
 
 // add a mer to hash array
 void add_mer(mer_dna &m, uint64_t v,
-             mer_hash& ary, filter& filter, OPERATION op){
-
+             mer_hash& ary, filter& filter, OPERATION op)
+{
     if(filter(m)){
         switch(op){
         case COUNT: {
@@ -119,191 +121,175 @@ void add_mer(mer_dna &m, uint64_t v,
 
 }
 
-// split sequence files
-bool split_sequence_files(MIMIR_NS::FileReader *in, void *ptr){
+bool skip_line(FileReader<ByteRecordFormat>* in)
+{
+    bool ret = false;
 
-    char ch = *(in->get_byte());
-    if(ch == '>') return true;
-    if(ch == '@') return true;
+    ByteRecordFormat* record = NULL;
 
-    return false;
-
-}
-
-// skip current line
-void skip_line(MIMIR_NS::FileReader* in, void *ptr){
-
-    while(!in->is_eof() && *(in->get_byte()) != '\n')
-        in->next();
-    in->next();
-
-}
-
-// parse sequence file, ignore quality score
-void parse_sequence(MIMIR_NS::FileReader* in, void *ptr){
-
-    MimirParam *param = (MimirParam*)ptr;
-
-
-    while( !in->is_eof() ){
-
-        unsigned int filled = 0;
-        mer_dna m, rcm;
-        char ch;
-
-        ch = *(in->get_byte());
-        if(ch == '>'){
-            // skip header
-            skip_line(in, ptr);
-            // until file tail or next sequence
-            while( !in->is_eof() && ((ch = *(in->get_byte())) != '>')){
-                if(ch == '\n') {
-                    in->next();
-                    continue;
-                }
-                // code the sequence
-                int code = m.code(ch);
-                if(code >= 0){
-                    m.shift_left(code);
-                    if(args.canonical_flag)
-                        rcm.shift_right(rcm.complement(code));
-                    filled = std::min(filled + 1, mer_dna::k());
-                    if(filled >= m.k()){
-                        mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
-                        add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
-                    }
-                }else{
-                    filled = 0;
-                }
-                in->next();
-            }
-        }else if(ch == '@'){
-            // skip header
-            skip_line(in, ptr);
-            while( !in->is_eof() && ((ch = *(in->get_byte())) != '@')){
-                // skip the scores
-                if(ch == '+'){
-                    skip_line(in, ptr);
-                    skip_line(in, ptr);
-                }
-                if(ch == '\n') {
-                    in->next();
-                    continue;
-                }
-                // code the sequence
-                int code = m.code(ch);
-                if(code >= 0){
-                    m.shift_left(code);
-                    if(args.canonical_flag)
-                        rcm.shift_right(rcm.complement(code));
-                    filled = std::min(filled + 1, mer_dna::k());
-                    if(filled >= m.k()){
-                        mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
-                        add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
-                    }
-                }else{
-                    filled = 0;
-                }
-                in->next();
-            }
-
-        }else{
-            fprintf(stderr, "Format error!\n");
-            MPI_Abort(MPI_COMM_WORLD, 1);
+    while ((record = in->next()) != NULL) {
+        char ch = *(record->get_record());
+        if (ch == '\n') break;
+        if (record->is_eof()) {
+            ret = true;
+            break;
         }
+    }
+
+    return ret;
+}
+
+void parse_sequence(FileReader<ByteRecordFormat>* in,
+                    char  sep,
+                    void *ptr)
+{
+    MimirParam* param = (MimirParam*)ptr;
+    ByteRecordFormat* record = NULL;
+
+    unsigned int filled = 0;
+    mer_dna m, rcm;
+    char ch;
+
+    // skip header
+    skip_line(in);
+    while ((record = in->next()) != NULL) {
+        ch = *(record->get_record());
+        //printf("%c", ch);
+        // next DNA sequence
+        if (ch == sep) {
+            filled = 0;
+            // skip header
+            bool ret = skip_line(in);
+            if (ret)
+                break;
+            continue;
+        }
+        // skip quality score
+        if (sep == '@' && ch == '+') {
+            skip_line(in);
+            skip_line(in);
+            continue;
+        }
+        if (ch == '\n') continue;
+        int code = m.code(ch);
+        //printf("ch=%c, code=%d\n", ch, code);
+        if (code >= 0) {
+            m.shift_left(code);
+            if (args.canonical_flag)
+                rcm.shift_right(rcm.complement(code));
+            filled = std::min(filled + 1, mer_dna::k());
+            if (filled >= m.k()) {
+                mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
+                add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
+            }
+        } else {
+            filled = 0;
+        }
+
+        if (record->is_eof()) break;
     }
 }
 
-// parse sequence with quality score
-void parse_qual_sequence(MIMIR_NS::FileReader* in, void *ptr){
-
+void add_qual_mers(std::string &seq, std::string &qual, void *ptr)
+{
     MimirParam *param = (MimirParam*)ptr;
 
-    // read until end of the file
-    while( !in->is_eof() ){
+    unsigned int filled = 0;
+    mer_dna m, rcm;
 
-        unsigned int filled = 0;
-        mer_dna m, rcm;
-        char ch;
-        std::string seq, qual;
+    if(seq.size() != qual.size()) {
+        fprintf(stderr, "the length of quality score does not match sequence length\n");
+        exit(1);
+    }
 
-        // skip header
-        ch = *(in->get_byte());
-        if(ch != '@') break;
-        skip_line(in, ptr);
-
-        // get sequence and quality scores
-        while( !in->is_eof() && ((ch = *(in->get_byte())) != '@')){
-            if(ch == '+'){
-                // skip header with '+'
-                skip_line(in, ptr);
-                // get quality score
-                while( !in->is_eof() && ((ch = *(in->get_byte())) != '@')){
-                    if(ch == '\n') {
-                        in->next();
-                        continue;
-                    }
-                    qual.append(&ch);
-                    in->next();
-                }
+    // get mers
+    std::string::iterator seq_iter = seq.begin();
+    std::string::iterator qual_iter = qual.begin();
+    for(;seq_iter != seq.end(); seq_iter++, qual_iter++){
+        const int code = m.code(*seq_iter);
+        const char qual = *qual_iter;
+        if(code >=0 && qual >= args.min_qual_char_arg[0]){
+            m.shift_left(code);
+            if(args.canonical_flag)
+                rcm.shift_right(rcm.complement(code));
+            filled = std::min(filled + 1, mer_dna::k());
+            if(filled >= m.k()){
+                mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
+                add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
             }
-            if(ch == '\n') {
-                in->next();
-                continue;
-            }
-            seq.append(&ch);
-            in->next();
+        }else{
+            filled = 0;
+        }
+    }
+
+}
+
+void parse_qual_sequence(FileReader<ByteRecordFormat>* in, 
+                         void *ptr)
+{
+    char ch;
+    std::string seq, qual;
+    ByteRecordFormat* record = NULL;
+
+    skip_line(in);
+    while ((record = in->next()) != NULL) {
+        ch = *(record->get_record());
+        // next DNA sequence
+        if (ch == '@') {
+            add_qual_mers(seq, qual, ptr);
+            bool ret = skip_line(in);
+            if (ret)
+                break;
+            continue;
         }
 
-        if(seq.size() != qual.size()) {
-            fprintf(stderr, "the length of quality score does not match sequence length\n");
+        if (ch == '+') {
+            skip_line(in);
+            while ((record = in->next()) != NULL) {
+                ch = *(record->get_record());
+                if (ch == '\n') continue;
+                qual.append(&ch);
+            }
+            if (ch == '\n') continue;
+            seq.append(&ch);
+        }
+
+        if (record->is_eof()) {
+            add_qual_mers(seq, qual, ptr);
             break;
         }
 
-        // get mers
-        std::string::iterator seq_iter = seq.begin();
-        std::string::iterator qual_iter = qual.begin();
-        for(;seq_iter != seq.end(); seq_iter++, qual_iter++){
-            const int code = m.code(*seq_iter);
-            const char qual = *qual_iter;
-            if(code >=0 && qual >= args.min_qual_char_arg[0]){
-                m.shift_left(code);
-                if(args.canonical_flag)
-                    rcm.shift_right(rcm.complement(code));
-                filled = std::min(filled + 1, mer_dna::k());
-                if(filled >= m.k()){
-                    mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
-                    add_mer(mer, 1, *(param->ary), *(param->filter), param->op);
-                }
-            }else{
-                filled = 0;
-            }
-        }
     }
 }
 
 // read sequence files
-void read_sequence_files(MIMIR_NS::MapReduce* mr,
-                    MIMIR_NS::FileReader* in,
-                    void* ptr)
+void read_sequence_files(FileReader<ByteRecordFormat>* reader,
+                         void* ptr)
 {
-    MimirParam *param = (MimirParam*)ptr;
 
-    while( in->is_empty() == false ){
-        char ch = *(in->get_byte());
+    MimirParam *param = (MimirParam*)ptr;
+    ByteRecordFormat *record = NULL;
+
+    reader->open();
+    while ((record = reader->next()) != NULL) {
+        char ch = *(record->get_record());
         // parse sequence file
         if(ch == '>' || (ch == '@' && !args.min_qual_char_given)) 
-            parse_sequence(in, ptr);
+            parse_sequence(reader, ch, ptr);
         // parse sequence file with quality score
-        else if(ch == '@') parse_qual_sequence(in, ptr);
-        in->next();
+        else if(ch == '@')
+            parse_qual_sequence(reader, ptr);
+        else{
+            printf("Error input format!\n");
+        }
     }
+    reader->close();
 
     (*(param->ary)).done();
 }
 
 // shuffle mers
-void shuffle_mers(MIMIR_NS::MapReduce *mr, void *ptr){
+void shuffle_mers(MapReduce *mr, void *ptr){
     MimirParam *param = (MimirParam*)ptr;
     mer_array *ary = param->ary->ary();
 
@@ -327,7 +313,7 @@ void shuffle_mers(MIMIR_NS::MapReduce *mr, void *ptr){
 }
 
 // add mers from Mimir
-void add_kv_mers(MIMIR_NS::MapReduce* mr, 
+void add_kv_mers(MapReduce* mr, 
               char *key, int keysize, 
               char *val, int valsize, 
               void *ptr){
@@ -344,6 +330,7 @@ int mcount_main(int argc, char *argv[])
 
   int provided, rank, size;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+  Mimir_Init(&argc, &argv, MPI_COMM_WORLD);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -388,8 +375,8 @@ int mcount_main(int argc, char *argv[])
   ary.dumper(dumper.get());
 
   MimirParam param;
-  std::unique_ptr<MIMIR_NS::MapReduce> mimir;
-  mimir.reset(new MIMIR_NS::MapReduce(MPI_COMM_WORLD));
+  std::unique_ptr<MapReduce> mimir;
+  mimir.reset(new MapReduce(MPI_COMM_WORLD));
 
   int key_len = ary.key_len();
   param.key_len = key_len / 8 + (key_len % 8 != 0);
@@ -433,8 +420,13 @@ int mcount_main(int argc, char *argv[])
 
   if(rank == 0) printf("start reading files\n");
   // local counting of mers
-  mimir->process_binary_file(path.c_str(), 1, 1, read_sequence_files, 
-                             split_sequence_files, &param, 0);
+  InputSplit* splitinput = FileSplitter::getFileSplitter()->split(path.c_str());
+  splitinput->print();
+  ByteRecordFormat::set_seperators("+@");
+  FileReader<ByteRecordFormat> reader(splitinput);
+  read_sequence_files(&reader, &param);
+  //mimir->process_binary_file(path.c_str(), 1, 1, read_sequence_files, 
+  //                           split_sequence_files, &param, 0);
   // Shuffle
   if(rank == 0) printf("start shuffle\n");
   mimir->init_key_value(shuffle_mers, &param);
@@ -480,6 +472,7 @@ int mcount_main(int argc, char *argv[])
   }
 
   mimir.release();
+  Mimir_Finalize();
   MPI_Finalize();
 
   auto after_dump_time = system_clock::now();
