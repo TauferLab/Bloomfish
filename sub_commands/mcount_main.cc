@@ -101,6 +101,8 @@ struct MimirParam{
     int  key_len, val_len;
 };
 
+uint64_t max_seq_len = 0;
+
 // add a mer to hash array
 void add_mer(mer_dna &m, uint64_t v,
              mer_hash& ary, filter& filter, OPERATION op)
@@ -150,6 +152,8 @@ void parse_sequence(FileReader<ByteRecordFormat>* in,
     mer_dna m, rcm;
     char ch;
 
+    uint64_t seq_len = 0;
+
     // skip header
     skip_line(in);
     while ((record = in->next()) != NULL) {
@@ -158,7 +162,8 @@ void parse_sequence(FileReader<ByteRecordFormat>* in,
         // next DNA sequence
         if (ch == sep) {
             filled = 0;
-            // skip header
+	    if (seq_len > max_seq_len) max_seq_len = seq_len;
+ 	    // skip header
             bool ret = skip_line(in);
             if (ret)
                 break;
@@ -171,7 +176,8 @@ void parse_sequence(FileReader<ByteRecordFormat>* in,
             continue;
         }
         if (ch == '\n') continue;
-        int code = m.code(ch);
+	seq_len++;
+ 	int code = m.code(ch);
         //printf("ch=%c, code=%d\n", ch, code);
         if (code >= 0) {
             m.shift_left(code);
@@ -188,6 +194,8 @@ void parse_sequence(FileReader<ByteRecordFormat>* in,
 
         if (record->is_eof()) break;
     }
+    
+    if (seq_len > max_seq_len) max_seq_len = seq_len;
 }
 
 void add_qual_mers(std::string &seq, std::string &qual, void *ptr)
@@ -420,24 +428,24 @@ int mcount_main(int argc, char *argv[])
 
   if(rank == 0) printf("start reading files\n");
   // local counting of mers
-  InputSplit* splitinput = FileSplitter::getFileSplitter()->split(path.c_str());
+  InputSplit* splitinput = FileSplitter::getFileSplitter()->split(path.c_str(), BYSIZE);
   splitinput->print();
-  ByteRecordFormat::set_seperators("+@");
+  ByteRecordFormat::set_seperators(">@");
   FileReader<ByteRecordFormat> reader(splitinput);
   read_sequence_files(&reader, &param);
   //mimir->process_binary_file(path.c_str(), 1, 1, read_sequence_files, 
   //                           split_sequence_files, &param, 0);
   // Shuffle
-  if(rank == 0) printf("start shuffle\n");
+  printf("%d[%d] start shuffle, max sequence length=%ld\n", rank, size, max_seq_len);
   mimir->init_key_value(shuffle_mers, &param);
   ary.ary()->clear();
 
   // read back mers from Mimir
-  if(rank == 0) printf("after final counting\n");
+  printf("%d[%d] after final counting\n", rank, size);
   mimir->map_key_value(mimir.get(), add_kv_mers, &param, 0);
   //}
   //
-  if(rank == 0) printf("done!\n");
+  printf("%d[%d] done!\n", rank, size);
 
   auto after_count_time = system_clock::now();
 
