@@ -101,7 +101,7 @@ struct MimirParam{
     int  key_len, val_len;
 };
 
-uint64_t max_seq_len = 0;
+uint64_t seq_count = 0, max_seq_len = 0;
 
 // add a mer to hash array
 void add_mer(mer_dna &m, uint64_t v,
@@ -163,7 +163,9 @@ void parse_sequence(FileReader<ByteRecordFormat>* in,
         if (ch == sep) {
             filled = 0;
 	    if (seq_len > max_seq_len) max_seq_len = seq_len;
- 	    // skip header
+	    seq_count++;
+	    seq_len = 0;
+	    // skip header
             bool ret = skip_line(in);
             if (ret)
                 break;
@@ -196,6 +198,7 @@ void parse_sequence(FileReader<ByteRecordFormat>* in,
     }
     
     if (seq_len > max_seq_len) max_seq_len = seq_len;
+    seq_count++;
 }
 
 void add_qual_mers(std::string &seq, std::string &qual, void *ptr)
@@ -306,7 +309,7 @@ void shuffle_mers(MapReduce *mr, void *ptr){
 
     for(size_t id = 0; id * block_info.second < param->ary->size(); id ++) {
         mer_dna key;
-        uint64_t val;
+        uint32_t val;
         mer_array::eager_iterator it(ary, 
                                      id * block_info.second, 
                                     (id + 1) * block_info.second);
@@ -328,7 +331,7 @@ void add_kv_mers(MapReduce* mr,
     MimirParam *param = (MimirParam*)ptr;
     mer_dna mer(mer_dna::k());
     memcpy(mer.data__(), key, keysize);
-    uint64_t count = *(uint64_t*)val;
+    uint32_t count = *(uint32_t*)val;
     add_mer(mer, count, *(param->ary), *(param->filter), param->op);
 }
 
@@ -388,9 +391,9 @@ int mcount_main(int argc, char *argv[])
 
   int key_len = ary.key_len();
   param.key_len = key_len / 8 + (key_len % 8 != 0);
-  param.val_len = sizeof(uint64_t);
+  param.val_len = sizeof(uint32_t);
   mimir->set_key_length(param.key_len);
-  mimir->set_value_length(sizeof(uint64_t));
+  mimir->set_value_length(sizeof(uint32_t));
 
   auto after_init_time = system_clock::now();
 
@@ -431,12 +434,12 @@ int mcount_main(int argc, char *argv[])
   InputSplit* splitinput = FileSplitter::getFileSplitter()->split(path.c_str(), BYSIZE);
   splitinput->print();
   ByteRecordFormat::set_seperators(">@");
-  FileReader<ByteRecordFormat> reader(splitinput);
-  read_sequence_files(&reader, &param);
+  CollecFileReader<ByteRecordFormat> reader(splitinput);
+  read_sequence_files((FileReader<ByteRecordFormat>*)&reader, &param);
   //mimir->process_binary_file(path.c_str(), 1, 1, read_sequence_files, 
   //                           split_sequence_files, &param, 0);
   // Shuffle
-  printf("%d[%d] start shuffle, max sequence length=%ld\n", rank, size, max_seq_len);
+  printf("%d[%d] start shuffle, sequence count=%ld, max sequence length=%ld\n", rank, size, seq_count, max_seq_len);
   mimir->init_key_value(shuffle_mers, &param);
   ary.ary()->clear();
 
@@ -478,6 +481,8 @@ int mcount_main(int argc, char *argv[])
       //} // if(!args.no_merge_flag
     } // if(!args.no_merge_flag
   }
+
+  MapReduce::output_stat("mimir");
 
   mimir.release();
   Mimir_Finalize();
