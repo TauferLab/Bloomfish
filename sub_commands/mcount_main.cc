@@ -99,18 +99,71 @@ struct MimirParam{
     struct filter *filter;
     OPERATION      op;
     int  key_len, val_len;
+    mer_dna m, rcm;
+    unsigned int filled;
 };
 
+MimirParam param;
 uint64_t seq_count = 0, max_seq_len = 0;
+int rank, size;
 
-//void combiner(MapReduce * mr, 
-//	      const char *key, int keysize,
-//	      const char *val1, int val1size,
-//	      const char *val2, int val2size, void *ptr)
-//{
-//    uint32_t count = *(uint32_t *) (val1) + *(int32_t *) (val2);
-//    mr->update_key_value(key, keysize, (char *) &count, sizeof(count));
-//}
+class MerRecord : public ByteRecord {
+  public:
+    virtual int get_left_border(char *buffer, uint64_t len, bool islast) {
+        int i = 0;
+        int extra = 0;
+        bool has_qual = false;
+
+        if (*buffer == '>' || *buffer == '@') return 0;
+
+        for (i = 0; (uint64_t)i < len; i++) {
+            if (*(buffer + i) == '\n') break;
+        }
+        i += 1;
+
+        if (*(buffer + i) == '+') {
+            for (; (uint64_t)i < len; i++) {
+                if (*(buffer + i) == '\n') break;
+            }
+            i += 1;
+            for (; (uint64_t)i < len; i++) {
+                if (*(buffer + i) == '\n') break;
+            }
+            i += 1;
+            has_qual = true;
+        }
+
+        if ((uint64_t)i > len) {
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+
+        if ((uint64_t)i == len) return i;
+
+        if (buffer[i] != '>' && buffer[i] != '@' ) {
+            if (!has_qual) {
+                param.filled = 0;
+                extra = std::min((unsigned int)len - (unsigned int)i, 
+                                 mer_dna::k() - 1);
+                for (int j = 0; j < extra; j++) {
+                    char ch = buffer[i + j];
+                    int code = param.m.code(ch);
+                    if (code >= 0) {
+                        param.m.shift_left(code);
+                        if (args.canonical_flag)
+                            param.rcm.shift_right(param.rcm.complement(code));
+                        param.filled = std::min(param.filled + 1, mer_dna::k());
+                    }
+                    else {
+                        param.filled = 0;
+                    }
+                }
+            } else {
+            }
+        }
+
+        return i + extra;
+    }
+};
 
 // add a mer to hash array
 void add_mer(mer_dna &m, uint64_t v,
@@ -136,9 +189,9 @@ bool skip_line(Readable* input)
 {
     bool ret = false;
 
-    ByteRecord* record = NULL;
+    MerRecord* record = NULL;
 
-    while ((record = (ByteRecord*)(input->read())) != NULL) {
+    while ((record = (MerRecord*)(input->read())) != NULL) {
         char ch = *(record->get_record());
 	if (ch == '\n') break;
 	if (record->is_eof()) {
@@ -150,63 +203,58 @@ bool skip_line(Readable* input)
     return ret;
 }
 
-void parse_sequence(Readable *input, Writable *output, char sep, void *ptr)
+void parse_sequence(Readable *input, Writable *output, void *ptr)
 {
-    MimirParam* param = (MimirParam*)ptr;
-    ByteRecord* record = NULL;
+    MerRecord* record = NULL;
 
-    unsigned int filled = 0;
-    mer_dna m, rcm;
     char ch;
     uint64_t seq_len = 0;
 
-    skip_line(input);
-    while ((record = (ByteRecord*)(input->read())) != NULL) {
+    while ((record = (MerRecord*)(input->read())) != NULL) {
         ch = *(record->get_record());
-	if (ch == sep) {
-            filled = 0;
-	    if (seq_len > max_seq_len) max_seq_len = seq_len;
-	    seq_count++;
-	    seq_len = 0;
+        if (ch == '>' || ch == '@') {
+            param.filled = 0;
+            if (seq_len > max_seq_len) max_seq_len = seq_len;
+            seq_count++;
+            seq_len = 0;
             bool ret = skip_line(input);
-	    if (ret) break;
+            if (ret) param.filled = 0;
             continue;
         }
-        if (sep == '@' && ch == '+') {
+        else if (ch == '+') {
             skip_line(input);
             skip_line(input);
             continue;
         }
-        if (ch == '\n') continue;
-	seq_len++;
- 	int code = m.code(ch);
+        else if (ch == '\n') continue;
+        seq_len++;
+        int code = param.m.code(ch);
         if (code >= 0) {
-            m.shift_left(code);
+            param.m.shift_left(code);
             if (args.canonical_flag)
-                rcm.shift_right(rcm.complement(code));
-            filled = std::min(filled + 1, mer_dna::k());
-            if (filled >= m.k()) {
-                mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
-		if((*(param->filter))(mer)) {
-		    KVRecord output_record((char*)mer.data(), param->key_len, NULL, 0);
-		    output->write(&output_record);
-		}
+                param.rcm.shift_right(param.rcm.complement(code));
+            param.filled = std::min(param.filled + 1, mer_dna::k());
+            if (param.filled >= mer_dna::k()) {
+                mer_dna mer = !args.canonical_flag 
+                    || param.m < param.rcm ? param.m : param.rcm;
+                if((*(param.filter))(mer)) {
+                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
+                    output->write(&output_record);
+                }
             }
         } else {
-            filled = 0;
+            param.filled = 0;
         }
 
-        if (record->is_eof()) break;
+        if (record->is_eof()) param.filled = 0;
     }
-    
+
     if (seq_len > max_seq_len) max_seq_len = seq_len;
     seq_count++;
 }
 
 void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *ptr)
 {
-    MimirParam *param = (MimirParam*)ptr;
-
     unsigned int filled = 0;
     mer_dna m, rcm;
 
@@ -228,16 +276,15 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
             filled = std::min(filled + 1, mer_dna::k());
             if(filled >= m.k()){
                 mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
- 		if((*(param->filter))(mer)) {
-		    KVRecord output_record((char*)mer.data(), param->key_len, NULL, 0);
-		    output->write(&output_record);
-		}
+                if((*(param.filter))(mer)) {
+                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
+                    output->write(&output_record);
+                }
             }
         }else{
             filled = 0;
         }
     }
-
 }
 
 void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
@@ -276,95 +323,37 @@ void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
     }
 }
 
-void read_sequence_files(Readable *input, Writable *output, void* ptr)
-{
-    //MimirParam *param = (MimirParam*)ptr;
-    ByteRecord *record = NULL;
-
-    while ((record = (ByteRecord*)(input->read())) != NULL) {
-        char ch = *(record->get_record());
-        if(ch == '>' || (ch == '@' && !args.min_qual_char_given)) 
-            parse_sequence(input, output, ch, ptr);
-        else if(ch == '@')
-            parse_qual_sequence(input, output, ptr);
-        else{
-            printf("Error input format!\n");
-        }
-    }
-}
-
-// shuffle mers
-#if 0
-void shuffle_mers(Readable input, Writable output, void *ptr){
-    MimirParam *param = (MimirParam*)ptr;
-    mer_array *ary = param->ary->ary();
-
-    std::pair<size_t, size_t> block_info; // { nb blocks, nb records }
-    block_info = ary->blocks_for_records(5 * ary->max_reprobe_offset());
-
-    for(size_t id = 0; id * block_info.second < param->ary->size(); id ++) {
-        mer_dna key;
-        uint32_t val;
-        mer_array::eager_iterator it(ary, 
-                                     id * block_info.second, 
-                                    (id + 1) * block_info.second);
-
-        while(it.next()){
-            key = it.key();
-            val = it.val();
-            KVRecord output_record((const char*)key.data(), param->key_len,
-				   (const char*)&(val), param->val_len);
-	    output->write(&output_record);
-        }
-    }
-}
-#endif
-
 class MerCounter : public Writable {
-    public:
-	MerCounter(MimirParam *param, bool localcount = true) {
-		this->param = param;
-		this->localcount = localcount;
-	}
-	bool open() {
-		record_count = 0;
-		return true;
-	}
-	void close() {
-	}
-	void write(BaseRecordFormat *record) {
-		KVRecord *kv = (KVRecord*)record;
-		mer_dna mer(mer_dna::k());
-		memcpy(mer.data__(), kv->get_key(), kv->get_key_size());
-		uint32_t count = 1;
-		if (!localcount) count = *(uint32_t*)(kv->get_val());
-		add_mer(mer, count, *(param->ary), *(param->filter), param->op);
-		record_count ++;
-	}
-	uint64_t get_record_count() { return record_count; }
-    private:
-	bool localcount;
-	MimirParam *param;
-	uint64_t record_count;
+  public:
+    MerCounter(bool localcount = true) {
+        this->localcount = localcount;
+    }
+    bool open() {
+        record_count = 0;
+        return true;
+    }
+    void close() {
+    }
+    void write(BaseRecordFormat *record) {
+        KVRecord *kv = (KVRecord*)record;
+        mer_dna mer(mer_dna::k());
+        memcpy(mer.data__(), kv->get_key(), kv->get_key_size());
+        uint32_t count = 1;
+        if (!localcount) count = *(uint32_t*)(kv->get_val());
+        add_mer(mer, count, *(param.ary), *(param.filter), param.op);
+        record_count ++;
+    }
+    uint64_t get_record_count() { return record_count; }
+  private:
+    bool localcount;
+    uint64_t record_count;
 };
-
-// add mers from Mimir
-//void add_kv_mers(MapReduce* mr, 
-//              char *key, int keysize, 
-//              char *val, int valsize, 
-//              void *ptr){
-//    MimirParam *param = (MimirParam*)ptr;
-//    mer_dna mer(mer_dna::k());
-//    memcpy(mer.data__(), key, keysize);
-//    uint32_t count = *(uint32_t*)val;
-//    add_mer(mer, count, *(param->ary), *(param->filter), param->op);
-//}
 
 int mcount_main(int argc, char *argv[])
 {
   auto start_time = system_clock::now();
 
-  int provided, rank, size;
+  int provided;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
   Mimir_Init(&argc, &argv, MPI_COMM_WORLD);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -410,12 +399,12 @@ int mcount_main(int argc, char *argv[])
                                      1, outfile, &header));
   ary.dumper(dumper.get());
 
-  MimirParam param;
   MimirContext mimir;
 
   int key_len = ary.key_len();
   param.key_len = key_len / 8 + (key_len % 8 != 0);
   param.val_len = sizeof(uint32_t);
+  param.filled  = 0;
   mimir.set_key_length(param.key_len);
   mimir.set_val_length(0);
   //mimir->set_combiner(combiner);
@@ -458,13 +447,13 @@ int mcount_main(int argc, char *argv[])
   // local counting of mers
   InputSplit* splitinput = FileSplitter::getFileSplitter()->split(path.c_str(), BYSIZE);
   splitinput->print();
-  ByteRecord::set_seperators(">@");
-  FileReader<ByteRecord> reader(splitinput);
+  //ByteRecord::set_separators(">@");
+  FileReader<MerRecord> reader(splitinput);
   //read_sequence_files((FileReader<ByteRecordFormat>*)&reader, &param);
-  MerCounter counter(&param);
-  mimir.set_map_callback(read_sequence_files);
+  MerCounter counter;
+  mimir.set_map_callback(parse_sequence);
   //mimit.set_shuffle_flag(false);
-  mimir.mapreduce(&reader, &counter, &param);
+  mimir.mapreduce(&reader, &counter, NULL);
 
   auto after_count_time = system_clock::now();
 
@@ -505,10 +494,12 @@ int mcount_main(int argc, char *argv[])
   auto after_dump_time = system_clock::now();
 
   if(args.timing_given) {
-    std::ofstream timing_file(args.timing_arg);
+    sprintf(outfile, "%s.%d.%d", args.timing_arg, size, rank);
+    std::ofstream timing_file(outfile);
     timing_file << "Init     " << as_seconds(after_init_time - start_time) << "\n"
                 << "Counting " << as_seconds(after_count_time - after_init_time) << "\n"
                 << "Writing  " << as_seconds(after_dump_time - after_count_time) << "\n";
+    timing_file << "Array " << ary.size() << "\n";
   }
 
   return 0;
