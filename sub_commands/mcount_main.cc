@@ -100,70 +100,12 @@ struct MimirParam{
     OPERATION      op;
     int  key_len, val_len;
     mer_dna m, rcm;
+    std::string seq, qual;
     unsigned int filled;
 };
 
 MimirParam param;
-uint64_t seq_count = 0, max_seq_len = 0;
 int rank, size;
-
-class MerRecord : public ByteRecord {
-  public:
-    virtual int get_left_border(char *buffer, uint64_t len, bool islast) {
-        int i = 0;
-        int extra = 0;
-        bool has_qual = false;
-
-        if (*buffer == '>' || *buffer == '@') return 0;
-
-        for (i = 0; (uint64_t)i < len; i++) {
-            if (*(buffer + i) == '\n') break;
-        }
-        i += 1;
-
-        if (*(buffer + i) == '+') {
-            for (; (uint64_t)i < len; i++) {
-                if (*(buffer + i) == '\n') break;
-            }
-            i += 1;
-            for (; (uint64_t)i < len; i++) {
-                if (*(buffer + i) == '\n') break;
-            }
-            i += 1;
-            has_qual = true;
-        }
-
-        if ((uint64_t)i > len) {
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-
-        if ((uint64_t)i == len) return i;
-
-        if (buffer[i] != '>' && buffer[i] != '@' ) {
-            if (!has_qual) {
-                param.filled = 0;
-                extra = std::min((unsigned int)len - (unsigned int)i, 
-                                 mer_dna::k() - 1);
-                for (int j = 0; j < extra; j++) {
-                    char ch = buffer[i + j];
-                    int code = param.m.code(ch);
-                    if (code >= 0) {
-                        param.m.shift_left(code);
-                        if (args.canonical_flag)
-                            param.rcm.shift_right(param.rcm.complement(code));
-                        param.filled = std::min(param.filled + 1, mer_dna::k());
-                    }
-                    else {
-                        param.filled = 0;
-                    }
-                }
-            } else {
-            }
-        }
-
-        return i + extra;
-    }
-};
 
 // add a mer to hash array
 void add_mer(mer_dna &m, uint64_t v,
@@ -172,7 +114,7 @@ void add_mer(mer_dna &m, uint64_t v,
     if(filter(m)){
         switch(op){
         case COUNT: {
-            //printf("%s\n", m.to_str().c_str());
+            //printf("rank=%d, %s\n", rank, m.to_str().c_str());
             ary.add(m, v); break;
         }
         case PRIME: ary.set(m); break;
@@ -182,146 +124,115 @@ void add_mer(mer_dna &m, uint64_t v,
         }; break;
         }
     }
-
 }
 
-bool skip_line(Readable* input)
-{
-    bool ret = false;
-
-    MerRecord* record = NULL;
-
-    while ((record = (MerRecord*)(input->read())) != NULL) {
-        char ch = *(record->get_record());
-	if (ch == '\n') break;
-	if (record->is_eof()) {
-            ret = true;
-            break;
-        }
-    }
-
-    return ret;
-}
-
-void parse_sequence(Readable *input, Writable *output, void *ptr)
-{
-    MerRecord* record = NULL;
-
-    char ch;
-    uint64_t seq_len = 0;
-
-    while ((record = (MerRecord*)(input->read())) != NULL) {
-        ch = *(record->get_record());
-        if (ch == '>' || ch == '@') {
-            param.filled = 0;
-            if (seq_len > max_seq_len) max_seq_len = seq_len;
-            seq_count++;
-            seq_len = 0;
-            bool ret = skip_line(input);
-            if (ret) param.filled = 0;
-            continue;
-        }
-        else if (ch == '+') {
-            skip_line(input);
-            skip_line(input);
-            continue;
-        }
-        else if (ch == '\n') continue;
-        seq_len++;
+int fasta_padding(char *buffer, int len) {
+    int padding = std::min((unsigned int)len, mer_dna::k() - 1);
+    param.filled = 0;
+    for (int j = 0; j < padding; j++) {
+        char ch = buffer[j];
         int code = param.m.code(ch);
         if (code >= 0) {
             param.m.shift_left(code);
             if (args.canonical_flag)
                 param.rcm.shift_right(param.rcm.complement(code));
             param.filled = std::min(param.filled + 1, mer_dna::k());
-            if (param.filled >= mer_dna::k()) {
-                mer_dna mer = !args.canonical_flag 
-                    || param.m < param.rcm ? param.m : param.rcm;
-                if((*(param.filter))(mer)) {
-                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
-                    output->write(&output_record);
-                }
-            }
-        } else {
+        }
+        else {
             param.filled = 0;
         }
-
-        if (record->is_eof()) param.filled = 0;
     }
-
-    if (seq_len > max_seq_len) max_seq_len = seq_len;
-    seq_count++;
+    return padding;
 }
 
-void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *ptr)
-{
-    unsigned int filled = 0;
-    mer_dna m, rcm;
+int fastq_padding(char *buffer, int len) {
+    int padding = 0;
+    while (padding < len && buffer[padding] != '\n') {
+        param.seq += buffer[padding];
+        padding ++;
+    }
+    padding ++;
 
-    if(seq.size() != qual.size()) {
-        fprintf(stderr, "the length of quality score does not match sequence length\n");
-        exit(1);
+    if (padding != '+') {
+        fprintf(stderr, "Cannot find '+' in the padding for fastq file\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    while (padding < len && buffer[padding] != '\n')
+        padding ++;
+    padding ++;
+
+    while (padding < len && buffer[padding] != '\n') {
+        param.qual += buffer[padding];
+        padding ++;
+    }
+    if (buffer[padding] == '\n') padding++;
+
+    if (param.seq.size() != param.qual.size()) {
+        fprintf(stderr, "The sequence and quality scores don't mactch!\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    // get mers
-    std::string::iterator seq_iter = seq.begin();
-    std::string::iterator qual_iter = qual.begin();
-    for(;seq_iter != seq.end(); seq_iter++, qual_iter++){
-        const int code = m.code(*seq_iter);
-        const char qual = *qual_iter;
-        if(code >=0 && qual >= args.min_qual_char_arg[0]){
-            m.shift_left(code);
-            if(args.canonical_flag)
-                rcm.shift_right(rcm.complement(code));
-            filled = std::min(filled + 1, mer_dna::k());
-            if(filled >= m.k()){
-                mer_dna mer = !args.canonical_flag || m < rcm ? m : rcm;
-                if((*(param.filter))(mer)) {
-                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
-                    output->write(&output_record);
-                }
+    param.filled = 0;
+    if (param.seq.size() > mer_dna::k() - 1) {
+        param.seq = param.seq.substr(param.seq.size() - mer_dna::k() + 1);
+        param.qual = param.qual.substr(param.qual.size() - mer_dna::k() + 1);
+    }
+
+    if (!args.min_qual_char_given) {
+        for (size_t j = 0; j < param.seq.size(); j++) {
+            char ch = param.seq[j];
+            int code = param.m.code(ch);
+            if (code >= 0) {
+                param.m.shift_left(code);
+                if (args.canonical_flag)
+                    param.rcm.shift_right(param.rcm.complement(code));
+                param.filled = std::min(param.filled + 1, mer_dna::k());
             }
-        }else{
-            filled = 0;
-        }
-    }
-}
-
-void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
-{
-    char ch;
-    std::string seq, qual;
-    ByteRecord* record = NULL;
-
-    skip_line(input);
-    while ((record = (ByteRecord*)(input->read())) != NULL) {
-        ch = *(record->get_record());
-        if (ch == '@') {
-            add_qual_mers(seq, qual, output, ptr);
-            bool ret = skip_line(input);
-            if (ret)
-                break;
-            continue;
-        }
-
-        if (ch == '+') {
-            skip_line(input);
-            while ((record = (ByteRecord*)(input->read())) != NULL) {
-                ch = *(record->get_record());
-                if (ch == '\n') continue;
-                qual.append(&ch);
+            else {
+                param.filled = 0;
             }
-            if (ch == '\n') continue;
-            seq.append(&ch);
         }
-
-        if (record->is_eof()) {
-            add_qual_mers(seq, qual, output, ptr);
-            break;
-        }
-
+        param.seq.clear();
+        param.qual.clear();
     }
+
+    return padding;
 }
+
+class MerRecord : public ByteRecord {
+  public:
+    virtual int get_left_border(char *buffer, uint64_t len, bool islast) {
+        int count = 0;
+        int padding = 0;
+        int line_num = 5;
+        bool has_qual = false;
+
+        for (int i = 0; i < line_num; i++) {
+            while ((uint64_t)count < len && buffer[count] != '\n') count ++;
+            if ((uint64_t)count == len && !islast) {
+                fprintf(stderr, "No enough line exsit in a partition\n");
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            if ((uint64_t)count == len) return count;
+            if ((uint64_t)count == len - 1) return count + 1;
+            count ++;
+            if (args.min_qual_char_given && buffer[count] == '>') {
+                fprintf(stderr, "Fastq file format error with '>'!\n");
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            if (buffer[count] == '>' || buffer[count] == '@')
+                return count;
+            if (buffer[count] == '+') {
+                has_qual = true;
+                line_num = i + 3;
+            }
+        }
+
+        if (has_qual) padding = fastq_padding(buffer + count, (int)len - count);
+        else padding = fasta_padding(buffer +count, (int)len - count);
+        return count + padding;
+    }
+};
 
 class MerCounter : public Writable {
   public:
@@ -348,6 +259,146 @@ class MerCounter : public Writable {
     bool localcount;
     uint64_t record_count;
 };
+
+bool skip_line(Readable* input)
+{
+    bool ret = false;
+
+    MerRecord* record = NULL;
+
+    while ((record = (MerRecord*)(input->read())) != NULL) {
+        char ch = *(record->get_record());
+	if (ch == '\n') break;
+	if (record->is_eof()) {
+            ret = true;
+            break;
+        }
+    }
+
+    return ret;
+}
+
+void parse_sequence(Readable *input, Writable *output, void *ptr)
+{
+    MerRecord* record = NULL;
+
+    char ch;
+
+    while ((record = (MerRecord*)(input->read())) != NULL) {
+        ch = *(record->get_record());
+        if (ch == '>' || ch == '@') {
+            param.filled = 0;
+            skip_line(input);
+            continue;
+        }
+        else if (ch == '+') {
+            skip_line(input);
+            skip_line(input);
+            continue;
+        }
+        else if (ch == '\n') continue;
+        int code = param.m.code(ch);
+        if (code >= 0) {
+            param.m.shift_left(code);
+            if (args.canonical_flag)
+                param.rcm.shift_right(param.rcm.complement(code));
+            param.filled = std::min(param.filled + 1, mer_dna::k());
+            if (param.filled >= mer_dna::k()) {
+                mer_dna mer = !args.canonical_flag 
+                    || param.m < param.rcm ? param.m : param.rcm;
+                if((*(param.filter))(mer)) {
+                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
+                    output->write(&output_record);
+                }
+            }
+        } else {
+            param.filled = 0;
+        }
+
+        if (record->is_eof()) param.filled = 0;
+    }
+}
+
+void add_qual_mers(Writable *output, void *ptr)
+{
+    if (param.seq.size() != param.qual.size()) {
+        fprintf(stderr, "the length of quality score (%ld) does not match sequence length (%ld)\n", 
+                param.qual.size(), param.seq.size());
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    std::string::iterator seq_iter = param.seq.begin();
+    std::string::iterator qual_iter = param.qual.begin();
+    for (;seq_iter != param.seq.end(); seq_iter++, qual_iter++) {
+        const int code = param.m.code(*seq_iter);
+        const char qual = *qual_iter;
+        if (code >=0 && qual >= args.min_qual_char_arg[0]) {
+            param.m.shift_left(code);
+            if (args.canonical_flag)
+                param.rcm.shift_right(param.rcm.complement(code));
+            param.filled = std::min(param.filled + 1, mer_dna::k());
+            if (param.filled >= param.m.k()) {
+                mer_dna mer = !args.canonical_flag || param.m < param.rcm ? param.m : param.rcm;
+                if((*(param.filter))(mer)) {
+                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
+                    output->write(&output_record);
+                }
+            }
+        }else{
+            param.filled = 0;
+        }
+    }
+
+    param.seq.clear();
+    param.qual.clear();
+}
+
+void parse_fastq_sequence(Readable *input, Writable *output, void *ptr)
+{
+    char ch;
+    ByteRecord* record = NULL;
+
+    while ((record = (ByteRecord*)(input->read())) != NULL) {
+        ch = *(record->get_record());
+        if (ch == '@') {
+            add_qual_mers(output, ptr);
+            param.filled = 0;
+            skip_line(input);
+            continue;
+        }
+
+        param.seq += ch;
+        while ((record = (ByteRecord*)(input->read())) != NULL) {
+            ch = *(record->get_record());
+            if (ch == '\n') {
+                break;
+            }
+            param.seq += ch;
+        }
+
+        record = (ByteRecord*)(input->read());
+        ch = *(record->get_record());
+
+        if (ch != '+') {
+            fprintf(stderr, "The fastq file format error!\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        } else {
+            skip_line(input);
+        }
+
+        while ((record = (ByteRecord*)(input->read())) != NULL) {
+            ch = *(record->get_record());
+            if (ch == '\n') {
+                break;
+            }
+            param.qual += ch;
+        }
+
+        add_qual_mers(output, ptr);
+
+        if (record->is_eof()) param.filled = 0;
+    }
+}
 
 int mcount_main(int argc, char *argv[])
 {
@@ -451,7 +502,10 @@ int mcount_main(int argc, char *argv[])
   FileReader<MerRecord> reader(splitinput);
   //read_sequence_files((FileReader<ByteRecordFormat>*)&reader, &param);
   MerCounter counter;
-  mimir.set_map_callback(parse_sequence);
+  if (args.min_qual_char_given)
+      mimir.set_map_callback(parse_fastq_sequence);
+  else
+      mimir.set_map_callback(parse_sequence);
   //mimit.set_shuffle_flag(false);
   mimir.mapreduce(&reader, &counter, NULL);
 
@@ -487,7 +541,6 @@ int mcount_main(int argc, char *argv[])
     } // if(!args.no_merge_flag
   }
 
-  Mimir_stat("mimir");
   Mimir_Finalize();
   MPI_Finalize();
 
