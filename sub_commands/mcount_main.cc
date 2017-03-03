@@ -159,7 +159,7 @@ class MerRecord : public StringRecord {
         int pre_pos = 0;
         char pre = 0;
         int pos = 0;
-        int line_num = 4;
+        int line_num = 5;
 
         for (int i=0; i < line_num; i++) {
             while ((uint64_t)pos < len && buffer[pos] != '\n') pos ++;
