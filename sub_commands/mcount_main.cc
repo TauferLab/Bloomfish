@@ -443,14 +443,20 @@ int mcount_main(int argc, char *argv[])
   param.ary = &ary;
   param.filter = mer_filter.get();
   param.op = do_op;
-  std::string path = *(args.file_arg.begin());
+  //std::string path = *(args.file_arg.begin());
 
   if(rank == 0) printf("start reading files\n");
   // local counting of mers
-  InputSplit* splitinput = FileSplitter::getFileSplitter()->split(path.c_str(), BYSIZE);
+  InputSplit input;
+  for (file_vector::const_iterator iter = args.file_arg.begin(); 
+       iter != args.file_arg.end(); iter++) {
+      std::string file = *(iter);
+      input.add(file.c_str());
+  }
+  InputSplit* splitinput = FileSplitter::getFileSplitter()->split(&input, BYSIZE);
   splitinput->print();
   StringRecord::set_whitespaces("\n");
-  FileReader<MerRecord> reader(splitinput);
+  MPIFileReader<MerRecord> reader(splitinput);
   //read_sequence_files((FileReader<ByteRecordFormat>*)&reader, &param);
   MerCounter counter;
   if (args.min_qual_char_given)
