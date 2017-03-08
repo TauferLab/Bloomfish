@@ -30,6 +30,7 @@
 #include <chrono>
 
 #include <jellyfish/err.hpp>
+#include <jellyfish/mer_heap.hpp>
 #include <jellyfish/jellyfish.hpp>
 #include <jellyfish/merge_files.hpp>
 #include <jellyfish/mer_dna_bloom_counter.hpp>
@@ -91,6 +92,114 @@ struct filter_bf : public filter {
   }
 };
 
+int rank, size;
+
+template<typename storage_t>
+class mimir_dumper
+{
+  public:
+    typedef typename storage_t::key_type key_type;
+    typedef typename storage_t::region_iterator iterator;
+    typedef typename jellyfish::mer_heap::heap<typename storage_t::key_type, iterator> heap_type;
+    typedef typename heap_type::const_item_t    heap_item;
+
+    mimir_dumper(const char* filename, jellyfish::file_header* header)
+    {
+        this->filename = filename;
+        this->header = header;
+        writer = new MPIFileWriter(filename);
+        min = 0;
+        max = std::numeric_limits<uint64_t>::max();
+        val_len_ = args.out_counter_len_arg;
+        max_val_ = (((uint64_t)1 << (8 * val_len_)) - 1);
+    }
+
+    ~mimir_dumper() {
+        delete writer;
+    }
+
+    void write_header(storage_t* ary) {
+      header->update_from_ary(*ary);
+      if (args.text_flag) {
+          header->format("text/sorted");
+      } else {
+          header->format("binary/sorted");
+          header->counter_len(val_len_);
+      }
+      std::ofstream out;
+      out.open(filename.c_str());
+      header->write(out);
+      out.close();
+    }
+
+    void dump(storage_t* ary) {
+        std::ostringstream           buffer;
+        storage_t* ary_ = ary;
+        std::pair<size_t, size_t> block_info 
+            = ary_->blocks_for_records(5 * ary_->max_reprobe_offset());
+        heap_type             heap(ary_->max_reprobe_offset());
+        size_t                count = 0;
+        typename storage_t::key_type key;
+
+        key_len_ = ary->key_len() / 8 + (ary->key_len() % 8 != 0);
+
+        if (rank == 0) {
+            write_header(ary);
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        writer->open();
+
+        for(size_t id = 0; id * block_info.second < ary_->size(); id += 1) {
+            // Fill buffer
+            iterator it(ary_, id * block_info.second, (id + 1) * block_info.second, key);
+            heap.fill(it);
+
+            while(heap.is_not_empty()) {
+                 heap_item item = heap.head();
+                if(item->val_ >= min && item->val_ <= max) {
+                     if (args.text_flag) {
+                        buffer << item->key_ << " " << item->val_ << "\n";
+                    } else {
+                        buffer.write((const char*)(item->key_).data(), key_len_);
+                        uint64_t v = std::min(max_val_, item->val_);
+                        buffer.write((const char*)&v, val_len_);
+                    }
+                    //printf("write record: %d\n", buffer.tellp());
+                    BaseRecordFormat record((char*)buffer.str().data(), buffer.tellp());
+                    writer->write(&record);
+                    buffer.seekp(0);
+                }
+                ++count;
+                heap.pop();
+                if(it.next())
+                    heap.push(it);
+            }
+        }
+
+        writer->close();
+     }
+
+    void set_min(uint64_t min) {
+        this->min = min;
+    }
+
+    void set_max(uint64_t max) {
+        this->max = max;
+    }
+
+  private:
+    std::string filename;
+    FileWriter *writer;
+    jellyfish::file_header *header;
+    uint64_t                 min;
+    uint64_t                 max;
+    int val_len_;
+    uint64_t max_val_;
+    int key_len_;
+};
+
 extern mer_dna_bloom_counter* load_bloom_filter(const char* path);
 enum OPERATION { COUNT, PRIME, UPDATE };
 
@@ -107,7 +216,6 @@ struct MimirParam{
 };
 
 MimirParam param;
-int rank, size;
 
 void report_error(const char *msg) {
     fprintf(stderr, "%d[%d] Error: %s\n", rank, size, msg);
@@ -391,15 +499,15 @@ int mcount_main(int argc, char *argv[])
   }
 
   // do not support multithreading
-  char outfile[1024]={0};
-  sprintf(outfile, "%s.%d.%d", args.output_arg, size, rank);
-  std::unique_ptr<jellyfish::dumper_t<mer_array> > dumper;
-  if(args.text_flag)
-    dumper.reset(new text_dumper(1, outfile, &header));
-  else
-      dumper.reset(new binary_dumper(args.out_counter_len_arg, ary.key_len(), 
-                                     1, outfile, &header));
-  ary.dumper(dumper.get());
+  //char outfile[1024]={0};
+  //sprintf(outfile, "%s.%d.%d", args.output_arg, size, rank);
+  //std::unique_ptr<jellyfish::dumper_t<mer_array> > dumper;
+  //if(args.text_flag)
+  //  dumper.reset(new text_dumper(1, outfile, &header));
+  //else
+  //    dumper.reset(new binary_dumper(args.out_counter_len_arg, ary.key_len(), 
+  //                                   1, outfile, &header));
+  //ary.dumper(dumper.get());
 
   MimirContext mimir;
 
@@ -470,16 +578,18 @@ int mcount_main(int argc, char *argv[])
 
   // If no intermediate files, dump directly into output file. If not, will do a round of merging
   if(!args.no_write_flag) {
-    if(dumper->nb_files() == 0) {
-      dumper->one_file(true);
+    //if(dumper->nb_files() == 0) {
+      //dumper->one_file(true);
+      //MPIFileWriter writer(args.output_arg);
+      mimir_dumper<mer_array> dumper(args.output_arg, &header);
       if(args.lower_count_given)
-        dumper->min(args.lower_count_arg);
+          dumper.set_min(args.lower_count_arg);
       if(args.upper_count_given)
-        dumper->max(args.upper_count_arg);
-      dumper->dump(ary.ary());
-    } else {
-      fprintf(stderr, "mcount currently does not support intermediate files.\n");
-      MPI_Abort(MPI_COMM_WORLD, 1);
+          dumper.set_max(args.upper_count_arg);
+      dumper.dump(ary.ary());
+    //} else {
+    //  fprintf(stderr, "mcount currently does not support intermediate files.\n");
+    //  MPI_Abort(MPI_COMM_WORLD, 1);
       //dumper->dump(ary.ary());
       //if(!args.no_merge_flag) {
       //  std::vector<const char*> files = dumper->file_names_cstr();
@@ -495,7 +605,7 @@ int mcount_main(int argc, char *argv[])
       //      unlink(files[i]);
       //  }
       //} // if(!args.no_merge_flag
-    } // if(!args.no_merge_flag
+    //} // if(!args.no_merge_flag
   }
 
   Mimir_Finalize();
@@ -504,8 +614,8 @@ int mcount_main(int argc, char *argv[])
   auto after_dump_time = system_clock::now();
 
   if(args.timing_given) {
-    sprintf(outfile, "%s.%d.%d", args.timing_arg, size, rank);
-    std::ofstream timing_file(outfile);
+    //sprintf(outfile, "%s.%d.%d", args.timing_arg, size, rank);
+    std::ofstream timing_file(args.timing_arg);
     timing_file << "Init     " << as_seconds(after_init_time - start_time) << "\n"
                 << "Counting " << as_seconds(after_count_time - after_init_time) << "\n"
                 << "Writing  " << as_seconds(after_dump_time - after_count_time) << "\n";
