@@ -15,7 +15,7 @@ pkgconfig_DATA = jellyfish-2.0.pc
 CXX=mpicxx
 CXXLD=mpicxx
 AM_LDFLAGS = -lpthread -lmimir -L$(MIMIR_LIB_DIR) # $(VALGRIND_LIBS)
-AM_CPPFLAGS = -Wall -Wnon-virtual-dtor -I$(srcdir) -I$(srcdir)/include -I$(MIMIR_INC_DIR) -g -O3 $(VALGRIND_CFLAGS)
+AM_CPPFLAGS = -Wall -Wnon-virtual-dtor -I$(srcdir) -I$(srcdir)/include -I$(MIMIR_INC_DIR) -g -O3 $(VALGRIND_CFLAGS) -DENABLE_PROFILER -DENABLE_TRACKER
 AM_CXXFLAGS = $(ALL_CXXFLAGS) -g -O3
 
 noinst_HEADERS = $(YAGGO_SOURCES)
@@ -46,6 +46,7 @@ check_PROGRAMS = bin/generate_sequence
 ############################
 bin_jellyfish_SOURCES = sub_commands/jellyfish.cc	\
 			sub_commands/mcount_main.cc	\
+			sub_commands/mstats_main.cc	\
 			sub_commands/count_main.cc	\
 			sub_commands/info_main.cc	\
 			sub_commands/dump_main.cc	\
