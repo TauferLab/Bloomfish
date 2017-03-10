@@ -107,7 +107,7 @@ class mimir_dumper
     {
         this->filename = filename;
         this->header = header;
-        writer = new MPIFileWriter(filename);
+        writer = FileWriter::getWriter(filename);
         min = 0;
         max = std::numeric_limits<uint64_t>::max();
         val_len_ = args.out_counter_len_arg;
@@ -115,7 +115,7 @@ class mimir_dumper
     }
 
     ~mimir_dumper() {
-        delete writer;
+        //delete writer;
     }
 
     void write_header(storage_t* ary) {
@@ -143,7 +143,9 @@ class mimir_dumper
 
         key_len_ = ary->key_len() / 8 + (ary->key_len() % 8 != 0);
 
-        if (rank == 0) {
+        if (writer->is_single_file()) {
+            if (rank == 0) write_header(ary);
+        } else {
             write_header(ary);
         }
 
@@ -564,7 +566,7 @@ int mcount_main(int argc, char *argv[])
   InputSplit* splitinput = FileSplitter::getFileSplitter()->split(&input, BYSIZE);
   splitinput->print();
   StringRecord::set_whitespaces("\n");
-  MPIFileReader<MerRecord> reader(splitinput);
+  FileReader<MerRecord> *reader = FileReader<MerRecord>::getReader(splitinput);
   //read_sequence_files((FileReader<ByteRecordFormat>*)&reader, &param);
   MerCounter counter;
   if (args.min_qual_char_given)
@@ -572,7 +574,7 @@ int mcount_main(int argc, char *argv[])
   else
       mimir.set_map_callback(parse_sequence);
   //mimit.set_shuffle_flag(false);
-  mimir.mapreduce(&reader, &counter, NULL);
+  mimir.mapreduce(reader, &counter, NULL);
 
   auto after_count_time = system_clock::now();
 
