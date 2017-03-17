@@ -39,6 +39,10 @@
 #include "mimir.h"
 using namespace MIMIR_NS;
 
+#define MAX_ITEM_SIZE 1024
+
+//#define COMBINE
+
 static count_main_cmdline args; // Command line switches and arguments
 
 namespace err = jellyfish::err;
@@ -94,6 +98,11 @@ struct filter_bf : public filter {
 
 int rank, size;
 
+void report_error(const char *msg) {
+    fprintf(stderr, "%d[%d] Error: %s\n", rank, size, msg);
+    MPI_Abort(MPI_COMM_WORLD, 1);
+}
+
 template<typename storage_t>
 class mimir_dumper
 {
@@ -105,9 +114,9 @@ class mimir_dumper
 
     mimir_dumper(const char* filename, jellyfish::file_header* header)
     {
-        this->filename = filename;
         this->header = header;
         writer = FileWriter::getWriter(filename);
+        this->filename = (writer->get_file_name()).c_str();
         min = 0;
         max = std::numeric_limits<uint64_t>::max();
         val_len_ = args.out_counter_len_arg;
@@ -133,7 +142,8 @@ class mimir_dumper
     }
 
     void dump(storage_t* ary) {
-        std::ostringstream           buffer;
+        char  buffer[MAX_ITEM_SIZE];
+        int   buflen = 0;
         storage_t* ary_ = ary;
         std::pair<size_t, size_t> block_info 
             = ary_->blocks_for_records(5 * ary_->max_reprobe_offset());
@@ -162,16 +172,22 @@ class mimir_dumper
                  heap_item item = heap.head();
                 if(item->val_ >= min && item->val_ <= max) {
                      if (args.text_flag) {
-                        buffer << item->key_ << " " << item->val_ << "\n";
+                        sprintf(buffer, "%s %ld\n", item->key_.to_str().c_str(), item->val_);
+                        buflen = strlen(buffer);
                     } else {
-                        buffer.write((const char*)(item->key_).data(), key_len_);
+                        memcpy(buffer, (const char*)(item->key_).data(), key_len_);
+                        buflen += key_len_;
                         uint64_t v = std::min(max_val_, item->val_);
-                        buffer.write((const char*)&v, val_len_);
+                        for (int ii = 0; ii < val_len_; ii++) {
+                            buffer[buflen + ii] = (unsigned char)(v >> (ii * 8));
+                        }
+                        buflen += val_len_;
                     }
-                    //printf("write record: %d\n", buffer.tellp());
-                    BaseRecordFormat record((char*)buffer.str().data(), buffer.tellp());
+                    if (buflen > MAX_ITEM_SIZE)
+                        report_error("The item size is too long!\n");
+                    BaseRecordFormat record(buffer, buflen);
                     writer->write(&record);
-                    buffer.seekp(0);
+                    buflen = 0;
                 }
                 ++count;
                 heap.pop();
@@ -218,11 +234,6 @@ struct MimirParam{
 };
 
 MimirParam param;
-
-void report_error(const char *msg) {
-    fprintf(stderr, "%d[%d] Error: %s\n", rank, size, msg);
-    MPI_Abort(MPI_COMM_WORLD, 1);
-}
 
 // add a mer to hash array
 void add_mer(mer_dna &m, uint64_t v,
@@ -315,8 +326,7 @@ class MerRecord : public StringRecord {
 
 class MerCounter : public Writable {
   public:
-    MerCounter(bool localcount = true) {
-        this->localcount = localcount;
+    MerCounter() {
     }
     bool open() {
         record_count = 0;
@@ -328,16 +338,50 @@ class MerCounter : public Writable {
         KVRecord *kv = (KVRecord*)record;
         mer_dna mer(mer_dna::k());
         memcpy(mer.data__(), kv->get_key(), kv->get_key_size());
-        uint32_t count = 1;
-        if (!localcount) count = *(uint32_t*)(kv->get_val());
+        uint64_t count = 1;
+#ifdef COMBINE
+        if (kv->get_val_size() != 0) {
+            count = strtoull((kv->get_val()), NULL, 0);
+        }
+#endif
         add_mer(mer, count, *(param.ary), *(param.filter), param.op);
         record_count ++;
     }
     uint64_t get_record_count() { return record_count; }
   private:
-    bool localcount;
     uint64_t record_count;
 };
+
+void add_mers(const char *seq, Writable *output, void *ptr)
+{
+    int len = (int)strlen(seq);
+    for (int i = 0; i < len; i++) {
+        char ch = seq[i];
+        int code = param.m.code(ch);
+        if (code >= 0) {
+            param.m.shift_left(code);
+            if (args.canonical_flag)
+                param.rcm.shift_right(param.rcm.complement(code));
+            param.filled = std::min(param.filled + 1, mer_dna::k());
+            if (param.filled >= mer_dna::k()) {
+                mer_dna mer = !args.canonical_flag 
+                    || param.m < param.rcm ? param.m : param.rcm;
+                if((*(param.filter))(mer)) {
+#ifndef COMBINE
+                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
+#else
+                    char tmp[2] = {"1"};
+                    KVRecord output_record((char*)mer.data(), param.key_len, tmp, 2);
+#endif
+                    output->write(&output_record);
+                }
+            }
+        } else {
+            param.filled = 0;
+        }
+    }
+
+}
 
 void parse_sequence(Readable *input, Writable *output, void *ptr)
 {
@@ -359,6 +403,7 @@ void parse_sequence(Readable *input, Writable *output, void *ptr)
             // sequence line
             line = record->get_record();
             seq = line;
+            add_mers(seq, output, ptr);
             // '+' line
             record = (MerRecord*)(input->read());
             if (!record) report_error("Fastq file format incorrect!!!");
@@ -368,33 +413,12 @@ void parse_sequence(Readable *input, Writable *output, void *ptr)
             param.filled = 0;
         } else if (param.ftype == FASTA_TYPE) {
             seq = line;
+            add_mers(seq, output, ptr);
         } else {
             report_error("File format incorrect!!!");
         }
 
-        int len = (int)strlen(seq);
-        for (int i = 0; i < len; i++) {
-            char ch = line[i];
-            int code = param.m.code(ch);
-            if (code >= 0) {
-                param.m.shift_left(code);
-                if (args.canonical_flag)
-                    param.rcm.shift_right(param.rcm.complement(code));
-                param.filled = std::min(param.filled + 1, mer_dna::k());
-                if (param.filled >= mer_dna::k()) {
-                    mer_dna mer = !args.canonical_flag 
-                        || param.m < param.rcm ? param.m : param.rcm;
-                    if((*(param.filter))(mer)) {
-                        KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
-                        output->write(&output_record);
-                    }
-                }
-            } else {
-                param.filled = 0;
-            }
-        }
     }
-
 }
 
 void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *ptr)
@@ -416,7 +440,12 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
             if (param.filled >= param.m.k()) {
                 mer_dna mer = !args.canonical_flag || param.m < param.rcm ? param.m : param.rcm;
                 if((*(param.filter))(mer)) {
+#ifndef COMBINE
                     KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
+#else
+                    char tmp[2] = {"1"};
+                    KVRecord output_record((char*)mer.data(), param.key_len, tmp, 2);
+#endif
                     output->write(&output_record);
                 }
             }
@@ -459,6 +488,18 @@ void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
 
         add_qual_mers(seq, qual, output, ptr);
     }
+}
+
+void combine_mers(Combinable *combiner, KVRecord *kv1, KVRecord *kv2, void* ptr)
+{
+    uint64_t count = strtoull(kv1->get_val(), NULL, 0) 
+        + strtoull(kv2->get_val(), NULL, 0);
+    char tmp[100] = {0};
+    sprintf(tmp, "%ld", count);
+    KVRecord update_record(kv1->get_key(),
+                           kv1->get_key_size(),
+                           tmp, (int)strlen(tmp)+1);
+    combiner->update(&update_record);
 }
 
 int mcount_main(int argc, char *argv[])
@@ -518,8 +559,11 @@ int mcount_main(int argc, char *argv[])
   param.val_len = sizeof(uint32_t);
   param.filled  = 0;
   mimir.set_key_length(param.key_len);
+#ifdef COMBINE
+  mimir.set_val_length(-1);
+#else
   mimir.set_val_length(0);
-  //mimir->set_combiner(combiner);
+#endif
 
   auto after_init_time = system_clock::now();
 
@@ -574,6 +618,9 @@ int mcount_main(int argc, char *argv[])
   else
       mimir.set_map_callback(parse_sequence);
   //mimit.set_shuffle_flag(false);
+#ifdef COMBINE
+  mimir.set_combine_callback(combine_mers);
+#endif
   mimir.mapreduce(reader, &counter, NULL);
 
   auto after_count_time = system_clock::now();
