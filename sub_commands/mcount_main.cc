@@ -39,7 +39,7 @@
 #include "mimir.h"
 using namespace MIMIR_NS;
 
-#define MAX_ITEM_SIZE 1024
+#define MAX_ITEM_SIZE 1048576
 
 //#define COMBINE
 
@@ -135,10 +135,18 @@ class mimir_dumper
           header->format("binary/sorted");
           header->counter_len(val_len_);
       }
-      std::ofstream out;
-      out.open(filename.c_str());
+      std::stringstream out;
+      //out.open(filename.c_str());
       header->write(out);
-      out.close();
+      std::string str = out.str();
+      if (str.size() > MAX_ITEM_SIZE) report_error("header too large!\n");
+      char buf[MAX_ITEM_SIZE];
+      int buflen = (int)(str.size());
+      sprintf(buf, "%s", str.c_str());
+      BaseRecordFormat record(buf, buflen);
+      writer->write(&record);
+      //out.close();
+
     }
 
     void dump(storage_t* ary) {
@@ -153,15 +161,14 @@ class mimir_dumper
 
         key_len_ = ary->key_len() / 8 + (ary->key_len() % 8 != 0);
 
+        //MPI_Barrier(MPI_COMM_WORLD);
+        writer->open();
+
         if (writer->is_single_file()) {
             if (rank == 0) write_header(ary);
         } else {
             write_header(ary);
         }
-
-        MPI_Barrier(MPI_COMM_WORLD);
-
-        writer->open();
 
         for(size_t id = 0; id * block_info.second < ary_->size(); id += 1) {
             // Fill buffer
@@ -275,7 +282,7 @@ int fasta_padding(char *buffer, int len) {
 
 class MerRecord : public StringRecord {
   public:
-    virtual int get_left_border(char *buffer, uint64_t len, bool islast) {
+    virtual int get_border_size(char *buffer, uint64_t len, bool islast) {
         int padding = 0;
         int pre_pos = 0;
         char pre = 0;
