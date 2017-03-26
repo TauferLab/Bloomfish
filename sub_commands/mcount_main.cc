@@ -348,7 +348,8 @@ class MerCounter : public Writable {
         uint64_t count = 1;
 #ifdef COMBINE
         if (kv->get_val_size() != 0) {
-            count = strtoull((kv->get_val()), NULL, 0);
+            //count = strtoull((kv->get_val()), NULL, 0);
+            count = decode_varint(kv->get_val());
         }
 #endif
         add_mer(mer, count, *(param.ary), *(param.filter), param.op);
@@ -377,8 +378,10 @@ void add_mers(const char *seq, Writable *output, void *ptr)
 #ifndef COMBINE
                     KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
 #else
-                    char tmp[2] = {"1"};
-                    KVRecord output_record((char*)mer.data(), param.key_len, tmp, 2);
+                    //char tmp[2] = {"1"};
+                    char val[100];
+                    int vallen = encode_varint(val, 1);
+                    KVRecord output_record((char*)mer.data(), param.key_len, val, vallen);
 #endif
                     output->write(&output_record);
                 }
@@ -450,8 +453,10 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
 #ifndef COMBINE
                     KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
 #else
-                    char tmp[2] = {"1"};
-                    KVRecord output_record((char*)mer.data(), param.key_len, tmp, 2);
+                    //char tmp[2] = {"1"};
+                    char val[100];
+                    int vallen = encode_varint(val, 1);
+                    KVRecord output_record((char*)mer.data(), param.key_len, val, vallen);
 #endif
                     output->write(&output_record);
                 }
@@ -499,13 +504,13 @@ void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
 
 void combine_mers(Combinable *combiner, KVRecord *kv1, KVRecord *kv2, void* ptr)
 {
-    uint64_t count = strtoull(kv1->get_val(), NULL, 0) 
-        + strtoull(kv2->get_val(), NULL, 0);
-    char tmp[100] = {0};
-    sprintf(tmp, "%ld", count);
+    uint64_t count = decode_varint(kv1->get_val()) 
+        + decode_varint(kv2->get_val());
+    char val[100] = {0};
+    int vallen = encode_varint(val, count);
     KVRecord update_record(kv1->get_key(),
                            kv1->get_key_size(),
-                           tmp, (int)strlen(tmp)+1);
+                           val, vallen);
     combiner->update(&update_record);
 }
 
@@ -567,7 +572,7 @@ int mcount_main(int argc, char *argv[])
   param.filled  = 0;
   mimir.set_key_length(param.key_len);
 #ifdef COMBINE
-  mimir.set_val_length(-1);
+  mimir.set_val_length(KVVARINT);
 #else
   mimir.set_val_length(0);
 #endif
