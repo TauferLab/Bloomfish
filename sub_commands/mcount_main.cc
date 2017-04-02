@@ -43,6 +43,8 @@ using namespace MIMIR_NS;
 
 //#define COMBINE
 
+uint64_t uniq = 0, distinct = 0, total = 0, maxcount = 0;
+
 static count_main_cmdline args; // Command line switches and arguments
 
 namespace err = jellyfish::err;
@@ -178,7 +180,11 @@ class mimir_dumper
             while(heap.is_not_empty()) {
                  heap_item item = heap.head();
                 if(item->val_ >= min && item->val_ <= max) {
-                     if (args.text_flag) {
+                    uniq  += item->val_ == 1;
+                    total += item->val_;
+                    maxcount    = std::max(maxcount, item->val_);
+                    ++distinct;
+                    if (args.text_flag) {
                         sprintf(buffer, "%s %ld\n", item->key_.to_str().c_str(), item->val_);
                         buflen = strlen(buffer);
                     } else {
@@ -670,6 +676,21 @@ int mcount_main(int argc, char *argv[])
   }
 
   Mimir_Finalize();
+
+  uint64_t global_uniq = 0, global_distinct = 0, global_total = 0, global_max = 0;
+
+  MPI_Reduce(&uniq, &global_uniq, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&distinct, &global_distinct, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&total, &global_total, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&maxcount, &global_max, 1, MPI_INT64_T, MPI_MAX, 0, MPI_COMM_WORLD);
+
+  if (rank == 0) {
+      std::cout << "Unique:    " << global_uniq << std::endl
+          << "Distinct:  " << global_distinct << std::endl
+          << "Total:     " << global_total << std::endl
+          << "Max_count: " << global_max << std::endl;
+  }
+
   MPI_Finalize();
 
   auto after_dump_time = system_clock::now();
