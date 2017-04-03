@@ -41,7 +41,7 @@ using namespace MIMIR_NS;
 
 #define MAX_ITEM_SIZE 1048576
 
-//#define COMBINE
+#define COMBINE
 
 uint64_t uniq = 0, distinct = 0, total = 0, maxcount = 0;
 
@@ -60,6 +60,22 @@ using jellyfish::mer_dna;
 using jellyfish::mer_dna_bloom_counter;
 using jellyfish::mer_dna_bloom_filter;
 typedef std::vector<const char*> file_vector;
+
+int rank, size;
+
+enum OPERATION { COUNT, PRIME, UPDATE };
+
+enum FileType { NULL_TYPE, FASTA_TYPE, FASTQ_TYPE };
+
+struct MimirParam{
+    struct filter *filter;
+    int  key_len, val_len;
+    mer_dna m, rcm;
+    unsigned int filled;
+    FileType ftype;
+};
+
+MimirParam param;
 
 // k-mer filters. Organized in a linked list, interpreted as a &&
 // (logical and). I.e. all filter must return true for the result to
@@ -98,15 +114,32 @@ struct filter_bf : public filter {
   }
 };
 
-int rank, size;
-
 void report_error(const char *msg) {
     fprintf(stderr, "%d[%d] Error: %s\n", rank, size, msg);
     MPI_Abort(MPI_COMM_WORLD, 1);
 }
 
+// add a mer to hash array
+void add_mer(mer_dna &m, uint64_t v,
+             mer_hash& ary, filter& filter, OPERATION op)
+{
+    if(filter(m)){
+        switch(op){
+        case COUNT: {
+            //printf("rank=%d, %s, %ld\n", rank, m.to_str().c_str(), v);
+            ary.add(m, v); break;
+        }
+        case PRIME: ary.set(m); break;
+        case UPDATE: {
+            mer_dna tmp;
+            ary.update_add(m, v);
+        }; break;
+        }
+    }
+}
+
 template<typename storage_t>
-class mimir_dumper
+class MerDatabase : public BaseDatabase
 {
   public:
     typedef typename storage_t::key_type key_type;
@@ -114,72 +147,64 @@ class mimir_dumper
     typedef typename jellyfish::mer_heap::heap<typename storage_t::key_type, iterator> heap_type;
     typedef typename heap_type::const_item_t    heap_item;
 
-    mimir_dumper(const char* filename, jellyfish::file_header* header)
-    {
-        this->header = header;
-        writer = FileWriter::getWriter(filename);
-        this->filename = (writer->get_file_name()).c_str();
-        min = 0;
-        max = std::numeric_limits<uint64_t>::max();
+    uint64_t get_record_count() {
+        return 0;
+    }
+
+    int key_len() {
+        return ary->key_len();
+    }
+
+    MerDatabase(OPERATION op, filter* filter = new struct filter) {
+        this->op = op;
+        this->filter = filter;
+        ary = new mer_hash(args.size_arg,
+                           args.mer_len_arg * 2,
+                           args.counter_len_arg, 1,
+                           args.reprobes_arg);
+        ary->do_size_doubling(true);
+        min_val = 0;
+        max_val = std::numeric_limits<uint64_t>::max();
+        key_len_ = ary->ary()->key_len() / 8 + (ary->ary()->key_len() % 8 != 0);
         val_len_ = args.out_counter_len_arg;
         max_val_ = (((uint64_t)1 << (8 * val_len_)) - 1);
+        block_info = ary->ary()->blocks_for_records(5 * ary->ary()->max_reprobe_offset());
     }
 
-    ~mimir_dumper() {
-        //delete writer;
+    ~MerDatabase() {
+        delete ary;
     }
 
-    void write_header(storage_t* ary) {
-      header->update_from_ary(*ary);
-      if (args.text_flag) {
-          header->format("text/sorted");
-      } else {
-          header->format("binary/sorted");
-          header->counter_len(val_len_);
-      }
-      std::stringstream out;
-      //out.open(filename.c_str());
-      header->write(out);
-      std::string str = out.str();
-      if (str.size() > MAX_ITEM_SIZE) report_error("header too large!\n");
-      char buf[MAX_ITEM_SIZE];
-      int buflen = (int)(str.size());
-      sprintf(buf, "%s", str.c_str());
-      BaseRecordFormat record(buf, buflen);
-      writer->write(&record);
-      //out.close();
-
-    }
-
-    void dump(storage_t* ary) {
-        char  buffer[MAX_ITEM_SIZE];
-        int   buflen = 0;
-        storage_t* ary_ = ary;
-        std::pair<size_t, size_t> block_info 
-            = ary_->blocks_for_records(5 * ary_->max_reprobe_offset());
-        heap_type             heap(ary_->max_reprobe_offset());
-        size_t                count = 0;
-        typename storage_t::key_type key;
-
-        key_len_ = ary->key_len() / 8 + (ary->key_len() % 8 != 0);
-
-        //MPI_Barrier(MPI_COMM_WORLD);
-        writer->open();
-
-        if (writer->is_single_file()) {
-            if (rank == 0) write_header(ary);
-        } else {
-            write_header(ary);
+    bool open() {
+        id = 0;
+        it = NULL;
+        buflen = 0;
+        heap = new heap_type(ary->ary()->max_reprobe_offset());
+        if (id * block_info.second < ary->ary()->size()) {
+            it = new iterator(ary->ary(),
+                              id * block_info.second,
+                              (id + 1) * block_info.second,
+                              key);
+            heap->fill((*it));
         }
+        return true;
+    }
 
-        for(size_t id = 0; id * block_info.second < ary_->size(); id += 1) {
-            // Fill buffer
-            iterator it(ary_, id * block_info.second, (id + 1) * block_info.second, key);
-            heap.fill(it);
+    void close() {
+        if (it != NULL) {
+            delete it;
+            it = NULL;
+        }
+        delete heap;
+        heap = NULL;
+    }
 
-            while(heap.is_not_empty()) {
-                 heap_item item = heap.head();
-                if(item->val_ >= min && item->val_ <= max) {
+    BaseRecordFormat* read() {
+
+        while (id * block_info.second < ary->ary()->size()) {
+            while (heap->is_not_empty()) {
+                heap_item item = heap->head();
+                if(item->val_ >= min_val && item->val_ <= max_val) {
                     uniq  += item->val_ == 1;
                     total += item->val_;
                     maxcount    = std::max(maxcount, item->val_);
@@ -198,76 +223,104 @@ class mimir_dumper
                     }
                     if (buflen > MAX_ITEM_SIZE)
                         report_error("The item size is too long!\n");
-                    BaseRecordFormat record(buffer, buflen);
-                    writer->write(&record);
+                    record.set_record(buffer, buflen);
                     buflen = 0;
+                    heap->pop();
+                    if(it->next()) heap->push(*it);
+                    return &record;
                 }
-                ++count;
-                heap.pop();
-                if(it.next())
-                    heap.push(it);
+                heap->pop();
+                if(it->next()) heap->push(*it);
             }
-        }
+            id += 1;
+            if (it != NULL) delete it;
+            it = new iterator(ary->ary(),
+                              id * block_info.second,
+                              (id + 1) * block_info.second,
+                              key);
+            heap->fill(*it);
+        };
 
-        writer->close();
-     }
-
-    void set_min(uint64_t min) {
-        this->min = min;
+        return NULL;
     }
 
-    void set_max(uint64_t max) {
-        this->max = max;
+    void write(BaseRecordFormat *record) {
+        KVRecord *kv = (KVRecord*)record;
+
+        mer_dna mer(mer_dna::k());
+        memcpy(mer.data__(), kv->get_key(), kv->get_key_size());
+        uint64_t count = 1;
+#ifdef COMBINE
+        if (kv->get_val_size() != 0) {
+            count = decode_varint(kv->get_val());
+        }
+#endif
+        if((*filter)(mer)){
+            switch(op){
+                case COUNT: {
+                    //printf("rank=%d, %s, %ld, %ld\n", rank, mer.to_str().c_str(), count, nwrite);
+                    ary->add(mer, count); break;
+                 }
+                case PRIME: ary->set(mer); break;
+                case UPDATE: {
+                    ary->update_add(mer, count);
+                }; break;
+            }
+        }
+    }
+
+    void set_min_val(uint64_t min) {
+        this->min_val = min;
+    }
+
+    void set_max_val(uint64_t max) {
+        this->max_val = max;
     }
 
   private:
-    std::string filename;
-    FileWriter *writer;
-    jellyfish::file_header *header;
-    uint64_t                 min;
-    uint64_t                 max;
-    int val_len_;
+    mer_hash* ary;
+    struct filter* filter;
+    OPERATION op;
+
+    iterator *it;
+    heap_type*  heap;
+    typename storage_t::key_type key;
+    size_t id;
+
+    std::pair<size_t, size_t> block_info;
+    uint64_t min_val, max_val;
+    int key_len_, val_len_;
     uint64_t max_val_;
-    int key_len_;
+
+    char  buffer[MAX_ITEM_SIZE];
+    int   buflen;
+    BaseRecordFormat record;
+
+    //void write_header(storage_t* ary) {
+    //  header->update_from_ary(*ary);
+    //  if (args.text_flag) {
+    //      header->format("text/sorted");
+    //  } else {
+    //      header->format("binary/sorted");
+    //      header->counter_len(val_len_);
+    //  }
+    //  std::stringstream out;
+      //out.open(filename.c_str());
+    //  header->write(out);
+    //  std::string str = out.str();
+    //  if (str.size() > MAX_ITEM_SIZE) report_error("header too large!\n");
+    //  char buf[MAX_ITEM_SIZE];
+    //  int buflen = (int)(str.size());
+    //  sprintf(buf, "%s", str.c_str());
+    //  BaseRecordFormat record(buf, buflen);
+    //  writer->write(&record);
+      //out.close();
+    //}
 };
 
 extern mer_dna_bloom_counter* load_bloom_filter(const char* path);
-enum OPERATION { COUNT, PRIME, UPDATE };
 
-enum FileType { NULL_TYPE, FASTA_TYPE, FASTQ_TYPE };
-
-struct MimirParam{
-    mer_hash      *ary;
-    struct filter *filter;
-    OPERATION      op;
-    int  key_len, val_len;
-    mer_dna m, rcm;
-    unsigned int filled;
-    FileType ftype;
-};
-
-MimirParam param;
-
-// add a mer to hash array
-void add_mer(mer_dna &m, uint64_t v,
-             mer_hash& ary, filter& filter, OPERATION op)
-{
-    if(filter(m)){
-        switch(op){
-        case COUNT: {
-            //printf("rank=%d, %s\n", rank, m.to_str().c_str());
-            ary.add(m, v); break;
-        }
-        case PRIME: ary.set(m); break;
-        case UPDATE: {
-            mer_dna tmp;
-            ary.update_add(m, v);
-        }; break;
-        }
-    }
-}
-
-int fasta_padding(char *buffer, int len) {
+int fasta_padding(const char *buffer, int len) {
     int padding = std::min((unsigned int)len, mer_dna::k() - 1);
     param.filled = 0;
     for (int j = 0; j < padding; j++) {
@@ -286,85 +339,53 @@ int fasta_padding(char *buffer, int len) {
     return padding;
 }
 
-class MerRecord : public StringRecord {
-  public:
-    virtual int get_border_size(char *buffer, uint64_t len, bool islast) {
-        int padding = 0;
-        int pre_pos = 0;
-        char pre = 0;
-        int pos = 0;
-        int line_num = 5;
+int repartition(const char *buffer, int len, bool islast) {
+    int padding = 0;
+    int pre_pos = 0;
+    char pre = 0;
+    int pos = 0;
+    int line_num = 5;
 
-        for (int i=0; i < line_num; i++) {
-            while ((uint64_t)pos < len && buffer[pos] != '\n') pos ++;
-            if ((uint64_t)pos == len && !islast) {
-                report_error("Cannot judge the border.");
-            }
-            if ((uint64_t)pos == len || (uint64_t)pos == (len - 1))
-                return (int)len;
-            pos ++;
-
-            if (pre == '>') {
-                if (buffer[pos] == '@') {
-                    param.ftype = FASTQ_TYPE;
-                    return pos;
-                }
-                else {
-                    param.ftype = FASTA_TYPE;
-                    return pre_pos;
-                }
-            }
-
-            if (pre == '@') {
-                param.ftype = FASTQ_TYPE;
-                if (buffer[pos] == '@') return pos;
-                else return pre_pos;
-            }
-
-            if (buffer[pos] == '@' || buffer[pos] == '>') {
-                pre_pos = pos;
-                pre = buffer[pos];
-            }
+    for (int i=0; i < line_num; i++) {
+        while (pos < len && buffer[pos] != '\n') pos ++;
+        if (pos == len && !islast) {
+            report_error("Cannot judge the border.");
         }
-
-        param.ftype = FASTA_TYPE;
-
-        pos = 0;
-        while (buffer[pos] != '\n') pos ++;
+        if (pos == len || pos == (len - 1))
+            return (int)len;
         pos ++;
-        padding = fasta_padding(buffer + pos, (int)len - pos);
-        return pos + padding;
-    }
-};
 
-class MerCounter : public Writable {
-  public:
-    MerCounter() {
-    }
-    bool open() {
-        record_count = 0;
-        return true;
-    }
-    void close() {
-    }
-    void write(BaseRecordFormat *record) {
-        KVRecord *kv = (KVRecord*)record;
-        mer_dna mer(mer_dna::k());
-        memcpy(mer.data__(), kv->get_key(), kv->get_key_size());
-        uint64_t count = 1;
-#ifdef COMBINE
-        if (kv->get_val_size() != 0) {
-            //count = strtoull((kv->get_val()), NULL, 0);
-            count = decode_varint(kv->get_val());
+        if (pre == '>') {
+            if (buffer[pos] == '@') {
+                param.ftype = FASTQ_TYPE;
+                return pos;
+            }
+            else {
+                param.ftype = FASTA_TYPE;
+                return pre_pos;
+            }
         }
-#endif
-        add_mer(mer, count, *(param.ary), *(param.filter), param.op);
-        record_count ++;
+
+        if (pre == '@') {
+            param.ftype = FASTQ_TYPE;
+            if (buffer[pos] == '@') return pos;
+            else return pre_pos;
+        }
+
+        if (buffer[pos] == '@' || buffer[pos] == '>') {
+            pre_pos = pos;
+            pre = buffer[pos];
+        }
     }
-    uint64_t get_record_count() { return record_count; }
-  private:
-    uint64_t record_count;
-};
+
+    param.ftype = FASTA_TYPE;
+
+    pos = 0;
+    while (buffer[pos] != '\n') pos ++;
+    pos ++;
+    padding = fasta_padding(buffer + pos, (int)len - pos);
+    return pos + padding;
+}
 
 void add_mers(const char *seq, Writable *output, void *ptr)
 {
@@ -384,11 +405,11 @@ void add_mers(const char *seq, Writable *output, void *ptr)
 #ifndef COMBINE
                     KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
 #else
-                    //char tmp[2] = {"1"};
                     char val[100];
                     int vallen = encode_varint(val, 1);
                     KVRecord output_record((char*)mer.data(), param.key_len, val, vallen);
 #endif
+                    //printf("write a mer %s\n", mer.to_str().c_str());
                     output->write(&output_record);
                 }
             }
@@ -401,11 +422,11 @@ void add_mers(const char *seq, Writable *output, void *ptr)
 
 void parse_sequence(Readable *input, Writable *output, void *ptr)
 {
-    MerRecord* record = NULL;
+    StringRecord* record = NULL;
     char *seq = NULL;
     char *line = NULL;
 
-    while ((record = (MerRecord*)(input->read())) != NULL ) {
+    while ((record = (StringRecord*)(input->read())) != NULL ) {
         line = record->get_record();
 
         if (line[0] == '>'){
@@ -414,17 +435,17 @@ void parse_sequence(Readable *input, Writable *output, void *ptr)
             continue;
         } else if (line[0] == '@') {
             param.ftype = FASTQ_TYPE;
-            record = (MerRecord*)(input->read());
+            record = (StringRecord*)(input->read());
             if (!record) return;
             // sequence line
             line = record->get_record();
             seq = line;
             add_mers(seq, output, ptr);
             // '+' line
-            record = (MerRecord*)(input->read());
+            record = (StringRecord*)(input->read());
             if (!record) report_error("Fastq file format incorrect!!!");
             // score line
-            record = (MerRecord*)(input->read());
+            record = (StringRecord*)(input->read());
             if (!record) report_error("Fastq file format incorrect!!!");
             param.filled = 0;
         } else if (param.ftype == FASTA_TYPE) {
@@ -459,7 +480,6 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
 #ifndef COMBINE
                     KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
 #else
-                    //char tmp[2] = {"1"};
                     char val[100];
                     int vallen = encode_varint(val, 1);
                     KVRecord output_record((char*)mer.data(), param.key_len, val, vallen);
@@ -478,24 +498,24 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
 
 void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
 {
-    MerRecord* record = NULL;
+    StringRecord* record = NULL;
     const char *line = NULL;
     std::string seq, qual;
 
-    while ((record = (MerRecord*)(input->read())) != NULL) {
+    while ((record = (StringRecord*)(input->read())) != NULL) {
         line = record->get_record();
 
         if (line[0] == '@') {
-            record = (MerRecord*)(input->read());
+            record = (StringRecord*)(input->read());
             if (!record) return;
             // sequence line
             line = record->get_record();
             seq += line;
             // '+' line
-            record = (MerRecord*)(input->read());
+            record = (StringRecord*)(input->read());
             if (!record) report_error("Fastq file format incorrect!!!");
             // score line
-            record = (MerRecord*)(input->read());
+            record = (StringRecord*)(input->read());
             if (!record) report_error("Fastq file format incorrect!!!");
             line = record->get_record();
             qual += line;
@@ -551,37 +571,11 @@ int mcount_main(int argc, char *argv[])
   }
 
   header.canonical(args.canonical_flag);
-  mer_hash ary(args.size_arg, args.mer_len_arg * 2, args.counter_len_arg, 1, args.reprobes_arg);
-  ary.do_size_doubling(true);
   if(args.disk_flag){
     //ary.do_size_doubling(false);
     fprintf(stderr, "mcount currently does not support --disk parameter.\n");
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
-
-  // do not support multithreading
-  //char outfile[1024]={0};
-  //sprintf(outfile, "%s.%d.%d", args.output_arg, size, rank);
-  //std::unique_ptr<jellyfish::dumper_t<mer_array> > dumper;
-  //if(args.text_flag)
-  //  dumper.reset(new text_dumper(1, outfile, &header));
-  //else
-  //    dumper.reset(new binary_dumper(args.out_counter_len_arg, ary.key_len(), 
-  //                                   1, outfile, &header));
-  //ary.dumper(dumper.get());
-
-  MimirContext mimir;
-
-  int key_len = ary.key_len();
-  param.key_len = key_len / 8 + (key_len % 8 != 0);
-  param.val_len = sizeof(uint32_t);
-  param.filled  = 0;
-  mimir.set_key_length(param.key_len);
-#ifdef COMBINE
-  mimir.set_val_length(KVVARINT);
-#else
-  mimir.set_val_length(0);
-#endif
 
   auto after_init_time = system_clock::now();
 
@@ -608,77 +602,49 @@ int mcount_main(int argc, char *argv[])
     mer_filter.reset(new filter_bf(*bf));
   }
 
-  //if(args.min_qual_char_given) {
-  //  fprintf(stderr, "mcount currently does not support -Q, --min-qual-char=string parameter.\n");
-  //  MPI_Abort(MPI_COMM_WORLD, 1);
-  //} else {
-  param.ary = &ary;
-  param.filter = mer_filter.get();
-  param.op = do_op;
-  //std::string path = *(args.file_arg.begin());
 
   if(rank == 0) printf("start reading files\n");
-  // local counting of mers
-  InputSplit input;
+  std::vector<std::string> input_dirs;
   for (file_vector::const_iterator iter = args.file_arg.begin(); 
        iter != args.file_arg.end(); iter++) {
-      std::string file = *(iter);
-      input.add(file.c_str());
+      input_dirs.push_back((*iter));
   }
-  InputSplit* splitinput = FileSplitter::getFileSplitter()->split(&input, BYSIZE);
-  splitinput->print();
-  StringRecord::set_whitespaces("\n");
-  FileReader<MerRecord> *reader = FileReader<MerRecord>::getReader(splitinput);
-  //read_sequence_files((FileReader<ByteRecordFormat>*)&reader, &param);
-  MerCounter counter;
-  if (args.min_qual_char_given)
-      mimir.set_map_callback(parse_qual_sequence);
-  else
-      mimir.set_map_callback(parse_sequence);
-  //mimit.set_shuffle_flag(false);
+
+  MerDatabase<mer_array> merdata(do_op, mer_filter.get());
+
+  int key_len = merdata.key_len();
+  param.filter = mer_filter.get();
+  param.key_len = key_len / 8 + (key_len % 8 != 0);
+  param.val_len = sizeof(uint32_t);
+  param.filled  = 0;
+
 #ifdef COMBINE
-  mimir.set_combine_callback(combine_mers);
+  int vsize = KVVARINT;
+  CombineCallback combine_fn = combine_mers;
+#else
+  int vsize = 0;
+  CombineCallback combine_fn = NULL;
 #endif
-  mimir.mapreduce(reader, &counter, NULL);
+
+  MapCallback map_fn = NULL;
+  if (args.min_qual_char_given)
+      map_fn = parse_qual_sequence;
+  else
+      map_fn = parse_sequence;
+
+  MimirContext<char*,char*> ctx(param.key_len, vsize,
+                                map_fn, NULL, input_dirs,
+                                std::string(args.output_arg),
+                                repartition, combine_fn);
+  ctx.set_user_database(&merdata);
+  ctx.map();
+  ctx.output();
 
   auto after_count_time = system_clock::now();
-
-  // If no intermediate files, dump directly into output file. If not, will do a round of merging
-  if(!args.no_write_flag) {
-    //if(dumper->nb_files() == 0) {
-      //dumper->one_file(true);
-      //MPIFileWriter writer(args.output_arg);
-      mimir_dumper<mer_array> dumper(args.output_arg, &header);
-      if(args.lower_count_given)
-          dumper.set_min(args.lower_count_arg);
-      if(args.upper_count_given)
-          dumper.set_max(args.upper_count_arg);
-      dumper.dump(ary.ary());
-    //} else {
-    //  fprintf(stderr, "mcount currently does not support intermediate files.\n");
-    //  MPI_Abort(MPI_COMM_WORLD, 1);
-      //dumper->dump(ary.ary());
-      //if(!args.no_merge_flag) {
-      //  std::vector<const char*> files = dumper->file_names_cstr();
-      //  uint64_t min = args.lower_count_given ? args.lower_count_arg : 0;
-      //  uint64_t max = args.upper_count_given ? args.upper_count_arg : std::numeric_limits<uint64_t>::max();
-      //  try {
-      //    merge_files(files, args.output_arg, header, min, max);
-      //  } catch(MergeError e) {
-      //    err::die(err::msg() << e.what());
-      //  }
-      //  if(!args.no_unlink_flag) {
-      //    for(int i =0; i < dumper->nb_files(); ++i)
-      //      unlink(files[i]);
-      //  }
-      //} // if(!args.no_merge_flag
-    //} // if(!args.no_merge_flag
-  }
 
   Mimir_Finalize();
 
   uint64_t global_uniq = 0, global_distinct = 0, global_total = 0, global_max = 0;
-
   MPI_Reduce(&uniq, &global_uniq, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
   MPI_Reduce(&distinct, &global_distinct, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
   MPI_Reduce(&total, &global_total, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -696,12 +662,10 @@ int mcount_main(int argc, char *argv[])
   auto after_dump_time = system_clock::now();
 
   if(args.timing_given) {
-    //sprintf(outfile, "%s.%d.%d", args.timing_arg, size, rank);
     std::ofstream timing_file(args.timing_arg);
     timing_file << "Init     " << as_seconds(after_init_time - start_time) << "\n"
                 << "Counting " << as_seconds(after_count_time - after_init_time) << "\n"
                 << "Writing  " << as_seconds(after_dump_time - after_count_time) << "\n";
-    timing_file << "Array " << ary.size() << "\n";
   }
 
   return 0;
