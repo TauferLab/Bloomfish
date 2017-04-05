@@ -41,9 +41,8 @@ using namespace MIMIR_NS;
 
 #define MAX_ITEM_SIZE 1048576
 
-#define COMBINE
-
-uint64_t uniq = 0, distinct = 0, total = 0, maxcount = 0;
+//#define LOCALCOUNT
+//#define COMBINE
 
 static count_main_cmdline args; // Command line switches and arguments
 
@@ -138,13 +137,12 @@ void add_mer(mer_dna &m, uint64_t v,
     }
 }
 
-template<typename storage_t>
 class MerDatabase : public BaseDatabase
 {
   public:
-    typedef typename storage_t::key_type key_type;
-    typedef typename storage_t::region_iterator iterator;
-    typedef typename jellyfish::mer_heap::heap<typename storage_t::key_type, iterator> heap_type;
+    typedef typename mer_array::key_type key_type;
+    typedef typename mer_array::region_iterator iterator;
+    typedef typename jellyfish::mer_heap::heap<typename mer_array::key_type, iterator> heap_type;
     typedef typename heap_type::const_item_t    heap_item;
 
     uint64_t get_record_count() {
@@ -155,9 +153,12 @@ class MerDatabase : public BaseDatabase
         return ary->key_len();
     }
 
-    MerDatabase(OPERATION op, filter* filter = new struct filter) {
+    MerDatabase(OPERATION op,
+                filter* filter = new struct filter,
+                bool islocal = false) {
         this->op = op;
         this->filter = filter;
+        this->islocal = islocal;
         ary = new mer_hash(args.size_arg,
                            args.mer_len_arg * 2,
                            args.counter_len_arg, 1,
@@ -169,17 +170,17 @@ class MerDatabase : public BaseDatabase
         val_len_ = args.out_counter_len_arg;
         max_val_ = (((uint64_t)1 << (8 * val_len_)) - 1);
         block_info = ary->ary()->blocks_for_records(5 * ary->ary()->max_reprobe_offset());
+        heap = new heap_type(ary->ary()->max_reprobe_offset());
     }
 
     ~MerDatabase() {
         delete ary;
+        delete heap;
     }
 
     bool open() {
         id = 0;
         it = NULL;
-        buflen = 0;
-        heap = new heap_type(ary->ary()->max_reprobe_offset());
         if (id * block_info.second < ary->ary()->size()) {
             it = new iterator(ary->ary(),
                               id * block_info.second,
@@ -195,8 +196,43 @@ class MerDatabase : public BaseDatabase
             delete it;
             it = NULL;
         }
-        delete heap;
-        heap = NULL;
+    }
+
+    void analysis() {
+        uint64_t uniq = 0, distinct = 0, total = 0, maxcount = 0;
+        uint64_t global_uniq = 0, global_distinct = 0, global_total = 0, global_max = 0;
+
+        for (id = 0; id * block_info.second < ary->ary()->size(); id ++) {
+            it = new iterator(ary->ary(),
+                              id * block_info.second,
+                              (id + 1) * block_info.second,
+                              key);
+            heap->fill((*it));
+            while (heap->is_not_empty()) {
+                heap_item item = heap->head();
+                if(item->val_ >= min_val && item->val_ <= max_val) {
+                    uniq  += item->val_ == 1;
+                    total += item->val_;
+                    maxcount    = std::max(maxcount, item->val_);
+                    ++distinct;
+                }
+                heap->pop();
+                if(it->next()) heap->push(*it);
+            }
+            delete it;
+        }
+
+        MPI_Reduce(&uniq, &global_uniq, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&distinct, &global_distinct, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&total, &global_total, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&maxcount, &global_max, 1, MPI_INT64_T, MPI_MAX, 0, MPI_COMM_WORLD);
+
+        if (rank == 0) {
+            std::cout << "Unique:    " << global_uniq << std::endl
+                << "Distinct:  " << global_distinct << std::endl
+                << "Total:     " << global_total << std::endl
+                << "Max_count: " << global_max << std::endl;
+        }
     }
 
     BaseRecordFormat* read() {
@@ -205,26 +241,31 @@ class MerDatabase : public BaseDatabase
             while (heap->is_not_empty()) {
                 heap_item item = heap->head();
                 if(item->val_ >= min_val && item->val_ <= max_val) {
-                    uniq  += item->val_ == 1;
-                    total += item->val_;
-                    maxcount    = std::max(maxcount, item->val_);
-                    ++distinct;
-                    if (args.text_flag) {
-                        sprintf(buffer, "%s %ld\n", item->key_.to_str().c_str(), item->val_);
-                        buflen = strlen(buffer);
+                    //if (args.text_flag) {
+                    //    sprintf(buffer, "%s %ld\n", item->key_.to_str().c_str(), item->val_);
+                    //    buflen = strlen(buffer);
+                    //} else {
+                    //    memcpy(buffer, (const char*)(item->key_).data(), key_len_);
+                    //    buflen += key_len_;
+                    uint64_t v = std::min(max_val_, item->val_);
+                    //    for (int ii = 0; ii < val_len_; ii++) {
+                    //        buffer[buflen + ii] = (unsigned char)(v >> (ii * 8));
+                    //    }
+                    //    buflen += val_len_;
+                    //}
+                    //if (buflen > MAX_ITEM_SIZE)
+                    //    report_error("The item size is too long!\n");
+                    memcpy(record_key, (char*)(item->key_).data(), key_len_);
+                    if (islocal) {
+                        int vallen = encode_varint(record_val, v);
+                        //printf("v=%ld, len=%d, %02x\n", v, vallen, val[0]);
+                        record.set_key_val( record_key, key_len_, record_val, vallen);
                     } else {
-                        memcpy(buffer, (const char*)(item->key_).data(), key_len_);
-                        buflen += key_len_;
-                        uint64_t v = std::min(max_val_, item->val_);
-                        for (int ii = 0; ii < val_len_; ii++) {
-                            buffer[buflen + ii] = (unsigned char)(v >> (ii * 8));
-                        }
-                        buflen += val_len_;
+                        record.set_key_val( record_key, key_len_, (char*)&v, val_len_);
                     }
-                    if (buflen > MAX_ITEM_SIZE)
-                        report_error("The item size is too long!\n");
-                    record.set_record(buffer, buflen);
-                    buflen = 0;
+                    //buflen = 0;
+                    //printf("%d[%d] read: %s, %ld\n",
+                    //       rank, size, item->key_.to_str().c_str(), item->val_);
                     heap->pop();
                     if(it->next()) heap->push(*it);
                     return &record;
@@ -250,7 +291,8 @@ class MerDatabase : public BaseDatabase
         mer_dna mer(mer_dna::k());
         memcpy(mer.data__(), kv->get_key(), kv->get_key_size());
         uint64_t count = 1;
-#ifdef COMBINE
+#ifdef LOCALCOUNT
+        //printf("val size=%d, %02x\n", kv->get_val_size(), *(kv->get_val()));
         if (kv->get_val_size() != 0) {
             count = decode_varint(kv->get_val());
         }
@@ -258,7 +300,8 @@ class MerDatabase : public BaseDatabase
         if((*filter)(mer)){
             switch(op){
                 case COUNT: {
-                    //printf("rank=%d, %s, %ld, %ld\n", rank, mer.to_str().c_str(), count, nwrite);
+                    //printf("%d[%d] write: %s, %ld\n",
+                    //       rank, size, mer.to_str().c_str(), count);
                     ary->add(mer, count); break;
                  }
                 case PRIME: ary->set(mer); break;
@@ -284,17 +327,19 @@ class MerDatabase : public BaseDatabase
 
     iterator *it;
     heap_type*  heap;
-    typename storage_t::key_type key;
+    typename mer_array::key_type key;
     size_t id;
 
     std::pair<size_t, size_t> block_info;
     uint64_t min_val, max_val;
     int key_len_, val_len_;
     uint64_t max_val_;
-
-    char  buffer[MAX_ITEM_SIZE];
-    int   buflen;
-    BaseRecordFormat record;
+    bool islocal;
+    char record_key[100];
+    char record_val[100];
+    //char  buffer[MAX_ITEM_SIZE];
+    //int   buflen;
+    KVRecord record;
 
     //void write_header(storage_t* ary) {
     //  header->update_from_ary(*ary);
@@ -402,14 +447,14 @@ void add_mers(const char *seq, Writable *output, void *ptr)
                 mer_dna mer = !args.canonical_flag 
                     || param.m < param.rcm ? param.m : param.rcm;
                 if((*(param.filter))(mer)) {
-#ifndef COMBINE
+#ifndef LOCALCOUNT
                     KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
 #else
                     char val[100];
                     int vallen = encode_varint(val, 1);
                     KVRecord output_record((char*)mer.data(), param.key_len, val, vallen);
 #endif
-                    //printf("write a mer %s\n", mer.to_str().c_str());
+                    //printf("%d[%d] generate mer %s\n", rank, size, mer.to_str().c_str());
                     output->write(&output_record);
                 }
             }
@@ -477,7 +522,7 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
             if (param.filled >= param.m.k()) {
                 mer_dna mer = !args.canonical_flag || param.m < param.rcm ? param.m : param.rcm;
                 if((*(param.filter))(mer)) {
-#ifndef COMBINE
+#ifndef LOCALCOUNT
                     KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
 #else
                     char val[100];
@@ -610,21 +655,11 @@ int mcount_main(int argc, char *argv[])
       input_dirs.push_back((*iter));
   }
 
-  MerDatabase<mer_array> merdata(do_op, mer_filter.get());
-
-  int key_len = merdata.key_len();
+  int key_len = args.mer_len_arg * 2;
   param.filter = mer_filter.get();
   param.key_len = key_len / 8 + (key_len % 8 != 0);
   param.val_len = sizeof(uint32_t);
   param.filled  = 0;
-
-#ifdef COMBINE
-  int vsize = KVVARINT;
-  CombineCallback combine_fn = combine_mers;
-#else
-  int vsize = 0;
-  CombineCallback combine_fn = NULL;
-#endif
 
   MapCallback map_fn = NULL;
   if (args.min_qual_char_given)
@@ -632,30 +667,51 @@ int mcount_main(int argc, char *argv[])
   else
       map_fn = parse_sequence;
 
-  MimirContext<char*,char*> ctx(param.key_len, vsize,
-                                map_fn, NULL, input_dirs,
-                                std::string(args.output_arg),
-                                repartition, combine_fn);
-  ctx.set_user_database(&merdata);
+#ifdef LOCALCOUNT
+#ifdef COMBINE
+  MimirContext<char*, char*> ctx(param.key_len, KVVARINT,
+                                 map_fn, NULL,
+                                 input_dirs, std::string(args.output_arg),
+                                 repartition, combine_mers);
+  MerDatabase db(do_op, mer_filter.get());
+  ctx.set_user_database(&db);
   ctx.map();
   ctx.output();
+#else
+  MimirContext<char*, char*> lctx(param.key_len, 0,
+                                  map_fn, NULL,
+                                  input_dirs, std::string(""),
+                                  repartition, NULL, NULL, false);
+  MerDatabase *ldb =  new MerDatabase(do_op, mer_filter.get(), true);
+  lctx.set_user_database(ldb);
+  lctx.map();
+  //ldb->analysis();
+  MimirContext<char*, char*> ctx(param.key_len, KVVARINT,
+                                 MIMIR_COPY, NULL,
+                                 input_dirs, std::string(args.output_arg));
+  ctx.insert_data(ldb);
+  MerDatabase db(do_op, mer_filter.get());
+  ctx.set_user_database(&db);
+  ctx.map();
+  delete ldb;
+  ctx.output();
+#endif
+#else
+  MimirContext<char*, char*> ctx(param.key_len, 0,
+                                 map_fn, NULL, input_dirs,
+                                 std::string(args.output_arg),
+                                 repartition);
+  MerDatabase db(do_op, mer_filter.get());
+  ctx.set_user_database(&db);
+  ctx.map();
+  ctx.output();
+#endif
 
   auto after_count_time = system_clock::now();
 
   Mimir_Finalize();
 
-  uint64_t global_uniq = 0, global_distinct = 0, global_total = 0, global_max = 0;
-  MPI_Reduce(&uniq, &global_uniq, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
-  MPI_Reduce(&distinct, &global_distinct, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
-  MPI_Reduce(&total, &global_total, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
-  MPI_Reduce(&maxcount, &global_max, 1, MPI_INT64_T, MPI_MAX, 0, MPI_COMM_WORLD);
-
-  if (rank == 0) {
-      std::cout << "Unique:    " << global_uniq << std::endl
-          << "Distinct:  " << global_distinct << std::endl
-          << "Total:     " << global_total << std::endl
-          << "Max_count: " << global_max << std::endl;
-  }
+  db.analysis();
 
   MPI_Finalize();
 
