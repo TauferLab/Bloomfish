@@ -53,10 +53,11 @@ int mstats_main(int argc, char *argv[])
 
   int provided, rank, size;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
-  Mimir_Init(&argc, &argv, MPI_COMM_WORLD);
+  //Mimir_Init(&argc, &argv, MPI_COMM_WORLD);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+#if 0
   FileSplitter spliter;
   InputSplit*  input = spliter.split(args.db_arg, BYNAME);
 
@@ -84,7 +85,6 @@ int mstats_main(int argc, char *argv[])
           err::die(err::msg() << "Unknown format '" << header.format() << "'");
       } 
   }
-
   uint64_t global_uniq = 0, global_distinct = 0, global_total = 0, global_max = 0;
  
   MPI_Reduce(&uniq, &global_uniq, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -104,8 +104,9 @@ int mstats_main(int argc, char *argv[])
           << "Max_count: " << global_max << "\n";
       out.close();
   }
+#endif
 
-  Mimir_Finalize();
+  //Mimir_Finalize();
   MPI_Finalize();
 
   return 0;

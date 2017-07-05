@@ -1,7 +1,5 @@
 ACLOCAL_AMFLAGS = -I m4
 
-MIMIR_DIR=/home/taogao/install/mimir/
-
 EXTRA_DIST = doc/jellyfish.pdf doc/jellyfish.man README LICENSE # jellyfish.spec
 man1_MANS = doc/jellyfish.man
 
@@ -10,8 +8,8 @@ pkgconfig_DATA = jellyfish-2.0.pc
 
 CXX=mpicxx
 CXXLD=mpicxx
-AM_LDFLAGS = -lpthread -lmimir -L$(MIMIR_DIR)/lib # $(VALGRIND_LIBS)
-AM_CPPFLAGS = -Wall -Wnon-virtual-dtor -I$(srcdir) -I$(srcdir)/include -I$(MIMIR_DIR)/include -g -O3 $(VALGRIND_CFLAGS) -DENABLE_PROFILER -DENABLE_TRACKER
+AM_LDFLAGS = -lpthread # $(VALGRIND_LIBS)
+AM_CPPFLAGS = -Wall -Wnon-virtual-dtor -I$(srcdir) -I$(srcdir)/include -g -O3 $(VALGRIND_CFLAGS) -DENABLE_PROFILER -DENABLE_TRACKER
 AM_CXXFLAGS = $(ALL_CXXFLAGS) -g -O3
 
 noinst_HEADERS = $(YAGGO_SOURCES)

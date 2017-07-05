@@ -39,10 +39,11 @@
 #include "mimir.h"
 using namespace MIMIR_NS;
 
-#define MAX_ITEM_SIZE 1048576
-
-//#define LOCALCOUNT
-//#define COMBINE
+#ifdef VAL64BITS
+using CountType = uint64_t;
+#else
+using CountType = uint32_t;
+#endif
 
 static count_main_cmdline args; // Command line switches and arguments
 
@@ -125,7 +126,6 @@ void add_mer(mer_dna &m, uint64_t v,
     if(filter(m)){
         switch(op){
         case COUNT: {
-            //printf("rank=%d, %s, %ld\n", rank, m.to_str().c_str(), v);
             ary.add(m, v); break;
         }
         case PRIME: ary.set(m); break;
@@ -137,7 +137,7 @@ void add_mer(mer_dna &m, uint64_t v,
     }
 }
 
-class MerDatabase : public BaseDatabase
+class MerDatabase : public BaseDatabase<char, CountType>
 {
   public:
     typedef typename mer_array::key_type key_type;
@@ -154,11 +154,9 @@ class MerDatabase : public BaseDatabase
     }
 
     MerDatabase(OPERATION op,
-                filter* filter = new struct filter,
-                bool islocal = false) {
+                filter* filter = new struct filter) {
         this->op = op;
         this->filter = filter;
-        this->islocal = islocal;
         ary = new mer_hash(args.size_arg,
                            args.mer_len_arg * 2,
                            args.counter_len_arg, 1,
@@ -178,7 +176,7 @@ class MerDatabase : public BaseDatabase
         delete heap;
     }
 
-    bool open() {
+    int open() {
         id = 0;
         it = NULL;
         if (id * block_info.second < ary->ary()->size()) {
@@ -188,7 +186,7 @@ class MerDatabase : public BaseDatabase
                               key);
             heap->fill((*it));
         }
-        return true;
+        return 1;
     }
 
     void close() {
@@ -235,40 +233,18 @@ class MerDatabase : public BaseDatabase
         }
     }
 
-    BaseRecordFormat* read() {
+    int read(char *mr_key, CountType *mr_val) {
 
         while (id * block_info.second < ary->ary()->size()) {
             while (heap->is_not_empty()) {
                 heap_item item = heap->head();
                 if(item->val_ >= min_val && item->val_ <= max_val) {
-                    //if (args.text_flag) {
-                    //    sprintf(buffer, "%s %ld\n", item->key_.to_str().c_str(), item->val_);
-                    //    buflen = strlen(buffer);
-                    //} else {
-                    //    memcpy(buffer, (const char*)(item->key_).data(), key_len_);
-                    //    buflen += key_len_;
                     uint64_t v = std::min(max_val_, item->val_);
-                    //    for (int ii = 0; ii < val_len_; ii++) {
-                    //        buffer[buflen + ii] = (unsigned char)(v >> (ii * 8));
-                    //    }
-                    //    buflen += val_len_;
-                    //}
-                    //if (buflen > MAX_ITEM_SIZE)
-                    //    report_error("The item size is too long!\n");
-                    memcpy(record_key, (char*)(item->key_).data(), key_len_);
-                    if (islocal) {
-                        int vallen = encode_varint(record_val, v);
-                        //printf("v=%ld, len=%d, %02x\n", v, vallen, val[0]);
-                        record.set_key_val( record_key, key_len_, record_val, vallen);
-                    } else {
-                        record.set_key_val( record_key, key_len_, (char*)&v, val_len_);
-                    }
-                    //buflen = 0;
-                    //printf("%d[%d] read: %s, %ld\n",
-                    //       rank, size, item->key_.to_str().c_str(), item->val_);
                     heap->pop();
                     if(it->next()) heap->push(*it);
-                    return &record;
+                    memcpy(mr_key, (char*)(item->key_).data(), key_len_);
+                    *mr_val = v;
+                    return 0;
                 }
                 heap->pop();
                 if(it->next()) heap->push(*it);
@@ -282,26 +258,20 @@ class MerDatabase : public BaseDatabase
             heap->fill(*it);
         };
 
-        return NULL;
+        return -1;
     }
 
-    void write(BaseRecordFormat *record) {
-        KVRecord *kv = (KVRecord*)record;
+    int write(char *mr_key, CountType *mr_val) {
+
+        //printf("%d write=%d\n", rank, *mr_val);
 
         mer_dna mer(mer_dna::k());
-        memcpy(mer.data__(), kv->get_key(), kv->get_key_size());
-        uint64_t count = 1;
-#ifdef LOCALCOUNT
-        //printf("val size=%d, %02x\n", kv->get_val_size(), *(kv->get_val()));
-        if (kv->get_val_size() != 0) {
-            count = decode_varint(kv->get_val());
-        }
-#endif
+        memcpy(mer.data__(), mr_key, param.key_len);
+        CountType count = *mr_val;
+
         if((*filter)(mer)){
             switch(op){
                 case COUNT: {
-                    //printf("%d[%d] write: %s, %ld\n",
-                    //       rank, size, mer.to_str().c_str(), count);
                     ary->add(mer, count); break;
                  }
                 case PRIME: ary->set(mer); break;
@@ -310,13 +280,15 @@ class MerDatabase : public BaseDatabase
                 }; break;
             }
         }
+
+        return 1;
     }
 
-    void set_min_val(uint64_t min) {
+    void set_min_val(CountType min) {
         this->min_val = min;
     }
 
-    void set_max_val(uint64_t max) {
+    void set_max_val(CountType max) {
         this->max_val = max;
     }
 
@@ -334,33 +306,6 @@ class MerDatabase : public BaseDatabase
     uint64_t min_val, max_val;
     int key_len_, val_len_;
     uint64_t max_val_;
-    bool islocal;
-    char record_key[100];
-    char record_val[100];
-    //char  buffer[MAX_ITEM_SIZE];
-    //int   buflen;
-    KVRecord record;
-
-    //void write_header(storage_t* ary) {
-    //  header->update_from_ary(*ary);
-    //  if (args.text_flag) {
-    //      header->format("text/sorted");
-    //  } else {
-    //      header->format("binary/sorted");
-    //      header->counter_len(val_len_);
-    //  }
-    //  std::stringstream out;
-      //out.open(filename.c_str());
-    //  header->write(out);
-    //  std::string str = out.str();
-    //  if (str.size() > MAX_ITEM_SIZE) report_error("header too large!\n");
-    //  char buf[MAX_ITEM_SIZE];
-    //  int buflen = (int)(str.size());
-    //  sprintf(buf, "%s", str.c_str());
-    //  BaseRecordFormat record(buf, buflen);
-    //  writer->write(&record);
-      //out.close();
-    //}
 };
 
 extern mer_dna_bloom_counter* load_bloom_filter(const char* path);
@@ -432,7 +377,8 @@ int repartition(const char *buffer, int len, bool islast) {
     return pos + padding;
 }
 
-void add_mers(const char *seq, Writable *output, void *ptr)
+void add_mers(const char *seq,
+              Writable<char,CountType> *output, void *ptr)
 {
     int len = (int)strlen(seq);
     for (int i = 0; i < len; i++) {
@@ -447,15 +393,8 @@ void add_mers(const char *seq, Writable *output, void *ptr)
                 mer_dna mer = !args.canonical_flag 
                     || param.m < param.rcm ? param.m : param.rcm;
                 if((*(param.filter))(mer)) {
-#ifndef LOCALCOUNT
-                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
-#else
-                    char val[100];
-                    int vallen = encode_varint(val, 1);
-                    KVRecord output_record((char*)mer.data(), param.key_len, val, vallen);
-#endif
-                    //printf("%d[%d] generate mer %s\n", rank, size, mer.to_str().c_str());
-                    output->write(&output_record);
+                    CountType one = 1;
+                    output->write((char*)mer.data(), &one);
                 }
             }
         } else {
@@ -465,33 +404,31 @@ void add_mers(const char *seq, Writable *output, void *ptr)
 
 }
 
-void parse_sequence(Readable *input, Writable *output, void *ptr)
+void parse_sequence(Readable<char*,void> *input,
+                    Writable<char,CountType> *output, void *ptr)
 {
-    StringRecord* record = NULL;
+    int ret = 0;
     char *seq = NULL;
     char *line = NULL;
 
-    while ((record = (StringRecord*)(input->read())) != NULL ) {
-        line = record->get_record();
-
+    while (input->read(&line, NULL) == 0) {
+        //printf("line=%s\n", line);
         if (line[0] == '>'){
             param.filled = 0;
             param.ftype = FASTA_TYPE;
             continue;
         } else if (line[0] == '@') {
             param.ftype = FASTQ_TYPE;
-            record = (StringRecord*)(input->read());
-            if (!record) return;
-            // sequence line
-            line = record->get_record();
+            ret = input->read(&line, NULL);
+            if (ret != 0) return;
             seq = line;
             add_mers(seq, output, ptr);
             // '+' line
-            record = (StringRecord*)(input->read());
-            if (!record) report_error("Fastq file format incorrect!!!");
+            ret = input->read(&line, NULL);
+            if (ret != 0) report_error("Fastq file format incorrect!!!");
             // score line
-            record = (StringRecord*)(input->read());
-            if (!record) report_error("Fastq file format incorrect!!!");
+            ret = input->read(&line, NULL);
+            if (ret != 0) report_error("Fastq file format incorrect!!!");
             param.filled = 0;
         } else if (param.ftype == FASTA_TYPE) {
             seq = line;
@@ -503,7 +440,8 @@ void parse_sequence(Readable *input, Writable *output, void *ptr)
     }
 }
 
-void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *ptr)
+void add_qual_mers(std::string &seq, std::string &qual,
+                   Writable<char,CountType> *output, void *ptr)
 {
     if (seq.size() != qual.size()) {
         report_error("The quality score does not mactch sequence length!");
@@ -522,14 +460,8 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
             if (param.filled >= param.m.k()) {
                 mer_dna mer = !args.canonical_flag || param.m < param.rcm ? param.m : param.rcm;
                 if((*(param.filter))(mer)) {
-#ifndef LOCALCOUNT
-                    KVRecord output_record((char*)mer.data(), param.key_len, NULL, 0);
-#else
-                    char val[100];
-                    int vallen = encode_varint(val, 1);
-                    KVRecord output_record((char*)mer.data(), param.key_len, val, vallen);
-#endif
-                    output->write(&output_record);
+                    CountType one = 1;
+                    output->write((char*)mer.data(), &one);
                 }
             }
         }else{
@@ -541,28 +473,26 @@ void add_qual_mers(std::string &seq, std::string &qual, Writable *output, void *
     qual.clear();
 }
 
-void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
+void parse_qual_sequence(Readable<char*, void> *input,
+                         Writable<char, CountType> *output, void *ptr)
 {
-    StringRecord* record = NULL;
-    const char *line = NULL;
+    char *line = NULL;
     std::string seq, qual;
+    int ret = 0;
 
-    while ((record = (StringRecord*)(input->read())) != NULL) {
-        line = record->get_record();
+    while (input->read(&line, NULL) == 0) {
 
         if (line[0] == '@') {
-            record = (StringRecord*)(input->read());
-            if (!record) return;
+            ret = input->read(&line, NULL);
+            if (ret != 0) return;
             // sequence line
-            line = record->get_record();
             seq += line;
             // '+' line
-            record = (StringRecord*)(input->read());
-            if (!record) report_error("Fastq file format incorrect!!!");
+            ret = input->read(&line, NULL);
+            if (ret != 0) report_error("Fastq file format incorrect!!!");
             // score line
-            record = (StringRecord*)(input->read());
-            if (!record) report_error("Fastq file format incorrect!!!");
-            line = record->get_record();
+            ret = input->read(&line, NULL);
+            if (ret != 0) report_error("Fastq file format incorrect!!!");
             qual += line;
             param.filled = 0;
         } else {
@@ -573,25 +503,12 @@ void parse_qual_sequence(Readable *input, Writable *output, void *ptr)
     }
 }
 
-void combine_mers(Combinable *combiner, KVRecord *kv1, KVRecord *kv2, void* ptr)
-{
-    uint64_t count = decode_varint(kv1->get_val()) 
-        + decode_varint(kv2->get_val());
-    char val[100] = {0};
-    int vallen = encode_varint(val, count);
-    KVRecord update_record(kv1->get_key(),
-                           kv1->get_key_size(),
-                           val, vallen);
-    combiner->update(&update_record);
-}
-
 int mcount_main(int argc, char *argv[])
 {
   auto start_time = system_clock::now();
 
   int provided;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
-  Mimir_Init(&argc, &argv, MPI_COMM_WORLD);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -658,58 +575,30 @@ int mcount_main(int argc, char *argv[])
   int key_len = args.mer_len_arg * 2;
   param.filter = mer_filter.get();
   param.key_len = key_len / 8 + (key_len % 8 != 0);
-  param.val_len = sizeof(uint32_t);
+  param.val_len = sizeof(CountType);
   param.filled  = 0;
 
-  MapCallback map_fn = NULL;
+  void (*map_fn)(Readable<char*, void> *,
+                 Writable<char, CountType> *, void *) = NULL;
+
   if (args.min_qual_char_given)
       map_fn = parse_qual_sequence;
   else
       map_fn = parse_sequence;
 
-#ifdef LOCALCOUNT
-#ifdef COMBINE
-  MimirContext<char*, char*> ctx(param.key_len, KVVARINT,
-                                 map_fn, NULL,
-                                 input_dirs, std::string(args.output_arg),
-                                 repartition, combine_mers);
+
+  MimirContext<char, CountType, char*, void> *ctx =
+      new MimirContext<char, CountType, char*, void>(
+       MPI_COMM_WORLD, param.key_len, 1, 1, 0, param.key_len, 1,
+       map_fn, NULL, input_dirs,
+       std::string(args.output_arg), repartition);
   MerDatabase db(do_op, mer_filter.get());
-  ctx.set_user_database(&db);
-  ctx.map();
-  ctx.output();
-#else
-  MimirContext<char*, char*> lctx(param.key_len, 0,
-                                  map_fn, NULL,
-                                  input_dirs, std::string(""),
-                                  repartition, NULL, NULL, false);
-  MerDatabase *ldb =  new MerDatabase(do_op, mer_filter.get(), true);
-  lctx.set_user_database(ldb);
-  lctx.map();
-  //ldb->analysis();
-  MimirContext<char*, char*> ctx(param.key_len, KVVARINT,
-                                 MIMIR_COPY, NULL,
-                                 input_dirs, std::string(args.output_arg));
-  ctx.insert_data(ldb);
-  MerDatabase db(do_op, mer_filter.get());
-  ctx.set_user_database(&db);
-  ctx.map();
-  delete ldb;
-  ctx.output();
-#endif
-#else
-  MimirContext<char*, char*> ctx(param.key_len, 0,
-                                 map_fn, NULL, input_dirs,
-                                 std::string(args.output_arg),
-                                 repartition);
-  MerDatabase db(do_op, mer_filter.get());
-  ctx.set_user_database(&db);
-  ctx.map();
-  ctx.output();
-#endif
+  ctx->set_user_database(&db);
+  ctx->map();
+  //ctx->output();
+  delete ctx;
 
   auto after_count_time = system_clock::now();
-
-  Mimir_Finalize();
 
   db.analysis();
 
