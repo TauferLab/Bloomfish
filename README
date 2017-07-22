@@ -1,3 +1,7 @@
+Bloomfish Configuration
+============
+./configure --prefix=/bloomfish/install/dir/ CPPFLAGS=-I/mimir/install/dir/include/ LDFLAGS=-L/mimir/install/dir/lib LIBS=-lmimir
+
 Installation
 ============
 
