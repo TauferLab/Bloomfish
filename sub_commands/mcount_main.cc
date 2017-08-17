@@ -263,8 +263,6 @@ class MerDatabase : public BaseDatabase<char, CountType>
 
     int write(char *mr_key, CountType *mr_val) {
 
-        //printf("%d write=%d\n", rank, *mr_val);
-
         mer_dna mer(mer_dna::k());
         memcpy(mer.data__(), mr_key, param.key_len);
         CountType count = *mr_val;
@@ -515,6 +513,21 @@ void parse_qual_sequence(Readable<char*, void> *input,
     }
 }
 
+void output_txt(Readable<char, CountType> *input,
+                Writable<const char*, CountType> *output, void *ptr) {
+    char key[param.key_len];
+    CountType count;
+    std::string key_txt;
+    const char *key_ptr = NULL;
+    while (input->read(key, &count) == true) {
+        mer_dna mer(mer_dna::k());
+        memcpy(mer.data__(), key, param.key_len);
+        key_txt = mer.to_str();
+        key_ptr = key_txt.c_str();
+        output->write(&key_ptr, &count);
+    }
+}
+
 int mcount_main(int argc, char *argv[])
 {
   auto start_time = system_clock::now();
@@ -610,7 +623,19 @@ int mcount_main(int argc, char *argv[])
   MerDatabase db(do_op, mer_filter.get());
   ctx->set_user_database(&db);
   ctx->map(map_fn);
-  ctx->output();
+
+  if (args.text_flag) {
+      MimirContext<const char*, CountType, char, CountType> *out_ctx =
+          new MimirContext<const char*, CountType, char, CountType>(
+                std::vector<std::string>(), std::string(args.output_arg),
+                MPI_COMM_WORLD, NULL, NULL, NULL,
+                param.key_len, 1, 1, 1, 1, 1);
+      out_ctx->insert_data_handle(ctx->get_data_handle());
+      out_ctx->map(output_txt, NULL, false, true, "text");
+      delete out_ctx;
+  } else {
+      ctx->output("binary");
+  }
   delete ctx;
 
   auto after_count_time = system_clock::now();
