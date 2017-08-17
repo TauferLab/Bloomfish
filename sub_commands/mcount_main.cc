@@ -186,7 +186,7 @@ class MerDatabase : public BaseDatabase<char, CountType>
                               key);
             heap->fill((*it));
         }
-        return 1;
+        return true;
     }
 
     void close() {
@@ -244,7 +244,7 @@ class MerDatabase : public BaseDatabase<char, CountType>
                     if(it->next()) heap->push(*it);
                     memcpy(mr_key, (char*)(item->key_).data(), key_len_);
                     *mr_val = v;
-                    return 0;
+                    return true;
                 }
                 heap->pop();
                 if(it->next()) heap->push(*it);
@@ -258,7 +258,7 @@ class MerDatabase : public BaseDatabase<char, CountType>
             heap->fill(*it);
         };
 
-        return -1;
+        return false;
     }
 
     int write(char *mr_key, CountType *mr_val) {
@@ -281,7 +281,19 @@ class MerDatabase : public BaseDatabase<char, CountType>
             }
         }
 
-        return 1;
+        return true;
+    }
+
+    int remove() {
+        fprintf(stderr, "Donot support remove funtion!\n");
+        exit(1);
+        return false;
+    }
+
+    int seek(DB_POS pos) {
+        fprintf(stderr, "Donot support seek funtion!\n");
+        exit(1);
+        return false;
     }
 
     void set_min_val(CountType min) {
@@ -411,7 +423,7 @@ void parse_sequence(Readable<char*,void> *input,
     char *seq = NULL;
     char *line = NULL;
 
-    while (input->read(&line, NULL) == 0) {
+    while (input->read(&line, NULL) == true) {
         //printf("line=%s\n", line);
         if (line[0] == '>'){
             param.filled = 0;
@@ -420,15 +432,15 @@ void parse_sequence(Readable<char*,void> *input,
         } else if (line[0] == '@') {
             param.ftype = FASTQ_TYPE;
             ret = input->read(&line, NULL);
-            if (ret != 0) return;
+            if (ret != true) return;
             seq = line;
             add_mers(seq, output, ptr);
             // '+' line
             ret = input->read(&line, NULL);
-            if (ret != 0) report_error("Fastq file format incorrect!!!");
+            if (ret != true) report_error("Fastq file format incorrect!!!");
             // score line
             ret = input->read(&line, NULL);
-            if (ret != 0) report_error("Fastq file format incorrect!!!");
+            if (ret != true) report_error("Fastq file format incorrect!!!");
             param.filled = 0;
         } else if (param.ftype == FASTA_TYPE) {
             seq = line;
@@ -480,19 +492,19 @@ void parse_qual_sequence(Readable<char*, void> *input,
     std::string seq, qual;
     int ret = 0;
 
-    while (input->read(&line, NULL) == 0) {
+    while (input->read(&line, NULL) == true) {
 
         if (line[0] == '@') {
             ret = input->read(&line, NULL);
-            if (ret != 0) return;
+            if (ret != true) return;
             // sequence line
             seq += line;
             // '+' line
             ret = input->read(&line, NULL);
-            if (ret != 0) report_error("Fastq file format incorrect!!!");
+            if (ret != true) report_error("Fastq file format incorrect!!!");
             // score line
             ret = input->read(&line, NULL);
-            if (ret != 0) report_error("Fastq file format incorrect!!!");
+            if (ret != true) report_error("Fastq file format incorrect!!!");
             qual += line;
             param.filled = 0;
         } else {
@@ -589,13 +601,16 @@ int mcount_main(int argc, char *argv[])
 
   MimirContext<char, CountType, char*, void> *ctx =
       new MimirContext<char, CountType, char*, void>(
-       MPI_COMM_WORLD, param.key_len, 1, 1, 0, param.key_len, 1,
-       map_fn, NULL, input_dirs,
-       std::string(args.output_arg), repartition);
+       input_dirs, std::string(args.output_arg),
+       MPI_COMM_WORLD,
+       NULL,
+       NULL,
+       repartition,
+       param.key_len, 1, 1, 0, param.key_len, 1);
   MerDatabase db(do_op, mer_filter.get());
   ctx->set_user_database(&db);
-  ctx->map();
-  //ctx->output();
+  ctx->map(map_fn);
+  ctx->output();
   delete ctx;
 
   auto after_count_time = system_clock::now();
