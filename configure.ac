@@ -50,6 +50,16 @@ AS_IF([test "x$enable_valgrind" = xyes],
       [AC_DEFINE([HAVE_VALGRIND], [1], [Define is using Valgrind])]
       [PKG_CHECK_MODULES([VALGRIND], [valgrind >= 1.8.0])])
 
+AC_ARG_WITH([mimir],[AS_HELP_STRING([--with-mimir[=DIR]], [Mimir directory])],
+            [with_mimir=$withval],[with_mimir=no])
+AS_IF([test "x$with_mimir" != xno],
+      [CPPFLAGS="-I$with_mimir/include $CPPFLAGS"],[])
+AS_IF([test "x$with_mimir" != xno],
+      [LDFLAGS="-L$with_mimir/lib $LDFLAGS"],[])
+LIBS="-lmimir $LIBS"
+AC_CHECK_LIB([mimir], [main], [],
+             [AC_MSG_ERROR([Could not find Mimir library])])
+
 # Check that type __int128 is supported and if the
 # std::numeric_limits<__int128> specialization exists
 AC_ARG_WITH([int128],

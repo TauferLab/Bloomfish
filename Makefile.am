@@ -30,7 +30,7 @@ V_YAGGO_0 = @echo "  YAGGO   " $@;
 YAGGO_SOURCES = # Append all file to be built by yaggo
 
 # What to build
-bin_PROGRAMS += bin/jellyfish
+bin_PROGRAMS += bin/bloomfish
 lib_LTLIBRARIES = libjellyfish-2.0.la
 LDADD = libjellyfish-2.0.la # $(VALGRIND_LIBS)
 check_PROGRAMS = bin/generate_sequence
@@ -38,7 +38,7 @@ check_PROGRAMS = bin/generate_sequence
 ############################
 # Build Jellyfish the exec #
 ############################
-bin_jellyfish_SOURCES = sub_commands/jellyfish.cc	\
+bin_bloomfish_SOURCES = sub_commands/jellyfish.cc	\
 			sub_commands/mcount_main.cc	\
 			sub_commands/mstats_main.cc	\
 			sub_commands/count_main.cc	\
@@ -52,7 +52,7 @@ bin_jellyfish_SOURCES = sub_commands/jellyfish.cc	\
 			sub_commands/cite_main.cc	\
 			sub_commands/mem_main.cc	\
 			jellyfish/merge_files.cc
-bin_jellyfish_LDFLAGS = $(AM_LDFLAGS) $(STATIC_FLAGS)
+bin_bloomfish_LDFLAGS = $(AM_LDFLAGS) $(STATIC_FLAGS)
 
 
 YAGGO_SOURCES += sub_commands/count_main_cmdline.hpp	\

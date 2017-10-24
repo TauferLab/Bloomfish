@@ -1,11 +1,11 @@
-Bloomfish Configuration
-============
-./configure --prefix=/bloomfish/install/dir/ CPPFLAGS=-I/mimir/install/dir/include/ LDFLAGS=-L/mimir/install/dir/lib LIBS=-lmimir
+Overview
+===========
+Bloomfish is a distributed-memory k-mer counting framework based on a single-node k-mer counting framewrok Jellyfish and a MapReduce over MPI framework Mimir.
 
 Installation
 ============
 
-% ./configure
+% ./configure --with-mimir=/mimir/install/dir
 % make
 # As root:
 % make install
