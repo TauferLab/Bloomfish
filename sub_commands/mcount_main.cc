@@ -339,7 +339,7 @@ int fasta_padding(const char *buffer, int len) {
     return padding;
 }
 
-int repartition(const char *buffer, int len, bool islast) {
+int repartition(uint64_t foff, const char *buffer, int len, bool islast) {
     int padding = 0;
     int pre_pos = 0;
     char pre = 0;
@@ -615,27 +615,31 @@ int mcount_main(int argc, char *argv[])
   MimirContext<char, CountType, char*, void> *ctx =
       new MimirContext<char, CountType, char*, void>(
        input_dirs, std::string(args.output_arg),
+       "text", "text",
        MPI_COMM_WORLD,
        NULL,
        NULL,
        repartition,
        param.key_len, 1, 1, 0, param.key_len, 1);
   MerDatabase db(do_op, mer_filter.get());
+#ifndef USE_MIMIR_DB
   ctx->set_user_database(&db);
+#endif
   ctx->map(map_fn);
 
-  if (args.text_flag) {
+  //if (args.text_flag) {
       MimirContext<const char*, CountType, char, CountType> *out_ctx =
           new MimirContext<const char*, CountType, char, CountType>(
                 std::vector<std::string>(), std::string(args.output_arg),
+                "null", "text",
                 MPI_COMM_WORLD, NULL, NULL, NULL,
-                param.key_len, 1, 1, 1, 1, 1);
+                1, 1, param.key_len, 1, 1, 1);
       out_ctx->insert_data_handle(ctx->get_data_handle());
-      out_ctx->map(output_txt, NULL, false, true, "text");
+      out_ctx->map(output_txt, NULL, false, true);
       delete out_ctx;
-  } else {
-      ctx->output("binary");
-  }
+  //} else {
+  //    ctx->output();
+  //}
   delete ctx;
 
   auto after_count_time = system_clock::now();
