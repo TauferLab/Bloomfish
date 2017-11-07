@@ -45,6 +45,8 @@ using CountType = uint64_t;
 using CountType = uint32_t;
 #endif
 
+uint64_t uniq = 0, distinct = 0, total = 0, maxcount = 0;
+
 static count_main_cmdline args; // Command line switches and arguments
 
 namespace err = jellyfish::err;
@@ -513,6 +515,35 @@ void parse_qual_sequence(Readable<char*, void> *input,
     }
 }
 
+void combine_fn(Combinable<char,CountType> *combiner,
+                char* key, CountType* val1, CountType* val2,
+                CountType* val3, void* ptr) {
+    *val3 = *val1 + *val2;
+}
+
+void analysis_fn(char *key, CountType *val, void *ptr) {
+    uniq ++;
+    if (*val == 1) distinct ++;
+    total += *val;
+    if (*val > maxcount) maxcount = *val;
+}
+
+void analysis() {
+    uint64_t global_uniq = 0, global_distinct = 0, global_total = 0, global_max = 0;
+
+    MPI_Reduce(&uniq, &global_uniq, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&distinct, &global_distinct, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&total, &global_total, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&maxcount, &global_max, 1, MPI_INT64_T, MPI_MAX, 0, MPI_COMM_WORLD);
+
+     if (rank == 0) {
+        std::cout << "Unique:    " << global_uniq << std::endl
+            << "Distinct:  " << global_distinct << std::endl
+            << "Total:     " << global_total << std::endl
+            << "Max_count: " << global_max << std::endl;
+    }
+}
+
 void output_txt(Readable<char, CountType> *input,
                 Writable<const char*, CountType> *output, void *ptr) {
     char key[param.key_len];
@@ -617,15 +648,20 @@ int mcount_main(int argc, char *argv[])
        input_dirs, std::string(args.output_arg),
        "text", "text",
        MPI_COMM_WORLD,
+#ifndef USE_MIMIR_DB
        NULL,
+#else
+       combine_fn,
+#endif
        NULL,
        repartition,
        param.key_len, 1, 1, 0, param.key_len, 1);
-  MerDatabase db(do_op, mer_filter.get());
 #ifndef USE_MIMIR_DB
+  MerDatabase db(do_op, mer_filter.get());
   ctx->set_user_database(&db);
 #endif
   ctx->map(map_fn);
+  ctx->scan(analysis_fn);
 
   //if (args.text_flag) {
       MimirContext<const char*, CountType, char, CountType> *out_ctx =
@@ -644,7 +680,7 @@ int mcount_main(int argc, char *argv[])
 
   auto after_count_time = system_clock::now();
 
-  db.analysis();
+  analysis();
 
   MPI_Finalize();
 
