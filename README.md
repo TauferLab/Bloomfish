@@ -1,5 +1,5 @@
 # Overview
-Bloomfish is a distributed-memory k-mer counting framework based on a single-node k-mer counting framewrok [Jellyfish](https://github.com/gmarcais/Jellyfish.git) and a MapReduce over MPI framework [Mimir](https://github.com/TauferLab/Mimir.git). It aims to combine advantages of both frameworks.
+Bloomfish is a distributed-memory k-mer counting framework based on a single-node k-mer counting framework [Jellyfish](https://github.com/gmarcais/Jellyfish.git) and a MapReduce over MPI framework [Mimir](https://github.com/TauferLab/Mimir.git). It aims to combine advantages of both frameworks.
 
 # Publication
 * Tao Gao, Yanfei Guo, Yanjie Wei, Bingqiang Wang, Yutong Lu, Pietro Cicotti,
