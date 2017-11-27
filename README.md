@@ -8,7 +8,9 @@ Counting Framework. IEEE International Conference on Parallel and Distributed
 Systems (ICPADS) 2017.
 
 # Installation
-
+* git clone https://github.com/TauferLab/Bloomfish.git
+* cd Bloomfish
+* autoreconf -i
 * ./configure --with-mimir=/mimir/install/dir
   --prefix=/bloomfish/install/dir
 * make
